@@ -14,9 +14,6 @@ temp.txt
 # Executables
 main
 
-# VS Code
-.vscode/
-
 # Build directories
 build/
 bin/
