@@ -9,14 +9,12 @@
       "cppStandard": "c++17",
       "includePath": [
         "${workspaceFolder}/**",
-        "/opt/homebrew/include",
-        "/usr/local/include"
+        "/opt/homebrew/include"
       ],
       "browse": {
         "path": [
           "${workspaceFolder}/**",
-          "/opt/homebrew/include",
-          "/usr/local/include"
+          "/opt/homebrew/include"
         ],
         "limitSymbolsToIncludedHeaders": true
       }
