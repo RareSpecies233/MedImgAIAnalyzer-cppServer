@@ -35,6 +35,12 @@
 
 5) 更新项目（部分更新）
 - 方法：PATCH /api/projects/{uuid}
+- 请求体：`{ "note": "string" }`1
+- 返回：200，更新后的项目对象
+- 未找到：404
+
+6) 修改备注（专用接口）
+- 方法：PATCH /api/projects/{uuid}/note
 - 请求体：`{ "note": "string" }`
 - 返回：200，更新后的项目对象
 - 未找到：404

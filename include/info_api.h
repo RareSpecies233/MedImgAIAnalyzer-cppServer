@@ -131,8 +131,33 @@ inline void register_info_routes(crow::SimpleApp &app, InfoStore &store) {
         }
     });
 
+    // 修改备注（PATCH）
+    CROW_ROUTE(app, "/api/projects/<string>/note").methods(crow::HTTPMethod::PATCH)([&store](const crow::request &req, const std::string &uuid){
+        try {
+            auto maybe_note = extract_string_field(req.body, "note");
+            if (!maybe_note) {
+                crow::response r{std::string("{\"error\":\"invalid json\"}")}; r.code = 400; set_json_headers(r); return r;
+            }
+            auto updated = store.patch(uuid, *maybe_note);
+            crow::response r{updated.to_json()}; r.code = 200; set_json_headers(r); return r;
+        } catch (const std::runtime_error &re) {
+            crow::response r{std::string("{\"error\":\"") + std::string(re.what()) + "\"}"}; r.code = 404; set_json_headers(r); return r;
+        } catch (const std::exception &e) {
+            crow::response r{std::string("{\"error\":\"") + e.what() + "\"}"}; r.code = 400; set_json_headers(r); return r;
+        }
+    });
+
     // CORS 预检（OPTIONS）
     CROW_ROUTE(app, "/api/projects/<string>").methods(crow::HTTPMethod::OPTIONS)([](const std::string &){
+        crow::response r;
+        r.set_header("Access-Control-Allow-Origin", "*");
+        r.set_header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS");
+        r.set_header("Access-Control-Allow-Headers", "Content-Type");
+        r.code = 204;
+        return r;
+    });
+
+    CROW_ROUTE(app, "/api/projects/<string>/note").methods(crow::HTTPMethod::OPTIONS)([](const std::string &){
         crow::response r;
         r.set_header("Access-Control-Allow-Origin", "*");
         r.set_header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS");
