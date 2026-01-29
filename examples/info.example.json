@@ -1,0 +1,142 @@
+[
+    {
+        "uuid": "00000000-0000-0000-0000-000000000000",
+        "name": "Example Project",
+        "createdAt": "2026-01-29T12:00:00Z",
+        "updatedAt": "2026-01-29T12:00:00Z",
+        "note": "This is an example project entry."
+    },
+    {
+        "uuid": "1a2b3c4d-5e6f-7g8h-9i0j-1k2l3m4n5o6p",
+        "name": "User Management System",
+        "createdAt": "2026-01-28T09:15:22Z",
+        "updatedAt": "2026-01-29T08:40:11Z",
+        "note": "Develop user authentication and permission management module."
+    },
+    {
+        "uuid": "2b3c4d5e-6f7g-8h9i-0j1k-2l3m4n5o6p7q",
+        "name": "Data Visualization Platform",
+        "createdAt": "2026-01-27T14:30:45Z",
+        "updatedAt": "2026-01-29T10:22:33Z",
+        "note": "Build real-time data chart and dashboard display function."
+    },
+    {
+        "uuid": "3c4d5e6f-7g8h-9i0j-1k2l-3m4n5o6p7q8r",
+        "name": "E-commerce Order System",
+        "createdAt": "2026-01-26T11:05:19Z",
+        "updatedAt": "2026-01-28T16:18:52Z",
+        "note": "Implement order creation, payment and logistics tracking functions."
+    },
+    {
+        "uuid": "4d5e6f7g-8h9i-0j1k-2l3m-4n5o6p7q8r9s",
+        "name": "Content Management System",
+        "createdAt": "2026-01-25T08:20:37Z",
+        "updatedAt": "2026-01-29T09:05:44Z",
+        "note": "Support article editing, classification and release management."
+    },
+    {
+        "uuid": "5e6f7g8h-9i0j-1k2l-3m4n-5o6p7q8r9s0t",
+        "name": "Mobile App Backend Service",
+        "createdAt": "2026-01-24T15:45:10Z",
+        "updatedAt": "2026-01-28T11:33:26Z",
+        "note": "Provide API interface and data storage support for mobile terminals."
+    },
+    {
+        "uuid": "6f7g8h9i-0j1k-2l3m-4n5o-6p7q8r9s0t1u",
+        "name": "AI Image Recognition Tool",
+        "createdAt": "2026-01-23T10:12:39Z",
+        "updatedAt": "2026-01-29T14:27:15Z",
+        "note": "Train model and develop image classification and detection functions."
+    },
+    {
+        "uuid": "7g8h9i0j-1k2l-3m4n-5o6p-7q8r9s0t1u2v",
+        "name": "Online Education Platform",
+        "createdAt": "2026-01-22T13:50:28Z",
+        "updatedAt": "2026-01-27T17:19:41Z",
+        "note": "Develop course online learning, live broadcast and examination system."
+    },
+    {
+        "uuid": "8h9i0j1k-2l3m-4n5o-6p7q-8r9s0t1u2v3w",
+        "name": "Financial Data Analysis System",
+        "createdAt": "2026-01-21T09:33:55Z",
+        "updatedAt": "2026-01-28T12:48:07Z",
+        "note": "Analyze financial data and generate report and early warning information."
+    },
+    {
+        "uuid": "9i0j1k2l-3m4n-5o6p-7q8r-9s0t1u2v3w4x",
+        "name": "Logistics Management System",
+        "createdAt": "2026-01-20T16:28:14Z",
+        "updatedAt": "2026-01-29T11:59:30Z",
+        "note": "Manage warehouse, transportation and distribution information."
+    },
+    {
+        "uuid": "0j1k2l3m-4n5o-6p7q-8r9s-0t1u2v3w4x5y",
+        "name": "Social Media Integration Tool",
+        "createdAt": "2026-01-19T14:07:36Z",
+        "updatedAt": "2026-01-27T08:25:13Z",
+        "note": "Integrate multiple social platforms for content release and data statistics."
+    },
+    {
+        "uuid": "1k2l3m4n-5o6p-7q8r-9s0t-1u2v3w4x5y6z",
+        "name": "Smart Home Control System",
+        "createdAt": "2026-01-18T11:42:58Z",
+        "updatedAt": "2026-01-28T15:37:29Z",
+        "note": "Realize remote control and status monitoring of smart devices."
+    },
+    {
+        "uuid": "2l3m4n5o-6p7q-8r9s-0t1u-2v3w4x5y6z7a",
+        "name": "Medical Record Management System",
+        "createdAt": "2026-01-17T08:10:02Z",
+        "updatedAt": "20226-01-29T13:14:47Z",
+        "note": "Store and manage electronic medical records and patient information."
+    },
+    {
+        "uuid": "3m4n5o6p-7q8r-9s0t-1u2v-3w4x5y6z7a8b",
+        "name": "Hotel Reservation System",
+        "createdAt": "2026-01-16T17:05:31Z",
+        "updatedAt": "2026-01-27T14:52:18Z",
+        "note": "Support room reservation, check-in and settlement management."
+    },
+    {
+        "uuid": "4n5o6p7q-8r9s-0t1u-2v3w-4x5y6z7a8b9c",
+        "name": "Car Rental Management Platform",
+        "createdAt": "2026-01-15T12:38:49Z",
+        "updatedAt": "2026-01-28T10:06:35Z",
+        "note": "Manage vehicle information, order and rental return process."
+    },
+    {
+        "uuid": "5o6p7q8r-9s0t-1u2v-3w4x-5y6z7a8b9c0d",
+        "name": "Office Automation System",
+        "createdAt": "2026-01-14T09:55:23Z",
+        "updatedAt": "2026-01-29T15:41:09Z",
+        "note": "Realize internal approval, document management and collaborative office."
+    },
+    {
+        "uuid": "6p7q8r9s-0t1u-2v3w-4x5y-6z7a8b9c0d1e",
+        "name": "Video Streaming Service",
+        "createdAt": "2026-01-13T14:22:17Z",
+        "updatedAt": "2026-01-26T16:30:54Z",
+        "note": "Build video storage, transcoding and online playback service."
+    },
+    {
+        "uuid": "7q8r9s0t-1u2v-3w4x-5y6z-7a8b9c0d1e2f",
+        "name": "Weather Forecast Application",
+        "createdAt": "2026-01-12T10:00:42Z",
+        "updatedAt": "2026-01-27T09:28:37Z",
+        "note": "Obtain weather data and provide forecast and early warning prompts."
+    },
+    {
+        "uuid": "8r9s0t1u-2v3w-4x5y-6z7a-8b9c0d1e2f3g",
+        "name": "Task Management Tool",
+        "createdAt": "2026-01-11T15:17:06Z",
+        "updatedAt": "2026-01-28T13:55:20Z",
+        "note": "Support task creation, assignment, progress tracking and summary."
+    },
+    {
+        "uuid": "9s0t1u2v-3w4x-5y6z-7a8b-9c0d1e2f3g4h",
+        "name": "File Cloud Storage Service",
+        "createdAt": "2026-01-10T08:44:51Z",
+        "updatedAt": "2026-01-29T16:02:14Z",
+        "note": "Provide file upload, download, storage and permission sharing function."
+    }
+]
