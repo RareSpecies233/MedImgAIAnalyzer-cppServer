@@ -2,6 +2,7 @@ main.dSYM/Contents
 .DS_Store
 /*.dSYM
 temp.txt
+db/
 
 # C++ compiled files
 *.o
