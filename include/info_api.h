@@ -347,8 +347,12 @@ inline void register_info_routes(crow::SimpleApp &app, InfoStore &store) {
                 crow::multipart::message msg(req);
                 int saved = 0;
                 for (auto &part : msg.parts) {
-                    std::string filename = "upload_" + std::to_string(saved) + ".bin";
-                    fs::path out = temp_dir / filename;
+                    std::string filename;
+                    const auto &cd = part.get_header_object("Content-Disposition");
+                    auto it = cd.params.find("filename");
+                    if (it != cd.params.end()) filename = it->second;
+                    if (filename.empty()) filename = "noname.bin";
+                    fs::path out = temp_dir / fs::path(filename).filename();
                     write_text_file(out, part.body);
                     ++saved;
                 }
@@ -357,8 +361,8 @@ inline void register_info_routes(crow::SimpleApp &app, InfoStore &store) {
             }
 
             std::string filename = req.get_header_value("X-Filename");
-            if (filename.empty()) filename = "upload.bin";
-            fs::path out = temp_dir / filename;
+            if (filename.empty()) filename = "noname.bin";
+            fs::path out = temp_dir / fs::path(filename).filename();
             write_text_file(out, req.body);
             crow::response r{"{\"saved\":1}"};
             r.code = 200; set_json_headers(r); return r;
@@ -416,7 +420,8 @@ inline void register_info_routes(crow::SimpleApp &app, InfoStore &store) {
                 }
             }
 
-            fs::path target_dir = project_dir / raw;
+            std::string raw_dir = (raw == "markednpz") ? "npz" : raw;
+            fs::path target_dir = project_dir / raw_dir;
             std::error_code ec;
             if (fs::exists(target_dir)) fs::remove_all(target_dir, ec);
             fs::rename(temp_dir, target_dir, ec);
@@ -466,6 +471,46 @@ inline void register_info_routes(crow::SimpleApp &app, InfoStore &store) {
             }
             fs::path png_path = store.base_path / uuid / "png" / filename;
             if (!fs::exists(png_path)) throw std::runtime_error("png not found");
+            crow::response r{read_text_file(png_path)};
+            r.set_header("Content-Type", "image/png");
+            r.set_header("Access-Control-Allow-Origin", "*");
+            r.code = 200;
+            return r;
+        } catch (const std::exception &e) {
+            crow::response r{std::string("{\"error\":\"") + e.what() + "\"}"};
+            r.code = 400; set_json_headers(r); return r;
+        }
+    });
+
+    // 获取 markedpng 列表
+    CROW_ROUTE(app, "/api/project/<string>/markedpng").methods(crow::HTTPMethod::GET)([&store](const std::string &uuid){
+        try {
+            if (!store.exists(uuid)) throw std::runtime_error("project not found");
+            fs::path marked_dir = store.base_path / uuid / "markedpng";
+            auto files = list_files(marked_dir);
+            std::string body = "[";
+            for (size_t i = 0; i < files.size(); ++i) {
+                body += "\"" + files[i].filename().string() + "\"";
+                if (i + 1 < files.size()) body += ",";
+            }
+            body += "]";
+            crow::response r{body};
+            r.code = 200; set_json_headers(r); return r;
+        } catch (const std::exception &e) {
+            crow::response r{std::string("{\"error\":\"") + e.what() + "\"}"};
+            r.code = 400; set_json_headers(r); return r;
+        }
+    });
+
+    // 获取单张 markedpng
+    CROW_ROUTE(app, "/api/project/<string>/markedpng/<string>").methods(crow::HTTPMethod::GET)([&store](const std::string &uuid, const std::string &filename){
+        try {
+            if (!store.exists(uuid)) throw std::runtime_error("project not found");
+            if (filename.find("..") != std::string::npos || filename.find('/') != std::string::npos || filename.find('\\') != std::string::npos) {
+                throw std::runtime_error("invalid filename");
+            }
+            fs::path png_path = store.base_path / uuid / "markedpng" / filename;
+            if (!fs::exists(png_path)) throw std::runtime_error("markedpng not found");
             crow::response r{read_text_file(png_path)};
             r.set_header("Content-Type", "image/png");
             r.set_header("Access-Control-Allow-Origin", "*");
@@ -708,6 +753,24 @@ inline void register_info_routes(crow::SimpleApp &app, InfoStore &store) {
     });
 
     CROW_ROUTE(app, "/api/project/<string>/png/<string>").methods(crow::HTTPMethod::OPTIONS)([](const std::string &, const std::string &){
+        crow::response r;
+        r.set_header("Access-Control-Allow-Origin", "*");
+        r.set_header("Access-Control-Allow-Methods", "GET, OPTIONS");
+        r.set_header("Access-Control-Allow-Headers", "Content-Type");
+        r.code = 204;
+        return r;
+    });
+
+    CROW_ROUTE(app, "/api/project/<string>/markedpng").methods(crow::HTTPMethod::OPTIONS)([](const std::string &){
+        crow::response r;
+        r.set_header("Access-Control-Allow-Origin", "*");
+        r.set_header("Access-Control-Allow-Methods", "GET, OPTIONS");
+        r.set_header("Access-Control-Allow-Headers", "Content-Type");
+        r.code = 204;
+        return r;
+    });
+
+    CROW_ROUTE(app, "/api/project/<string>/markedpng/<string>").methods(crow::HTTPMethod::OPTIONS)([](const std::string &, const std::string &){
         crow::response r;
         r.set_header("Access-Control-Allow-Origin", "*");
         r.set_header("Access-Control-Allow-Methods", "GET, OPTIONS");

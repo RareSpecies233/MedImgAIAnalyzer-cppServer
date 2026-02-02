@@ -66,7 +66,7 @@
 6) 上传文件
 - 方法：POST /api/project/{uuid}/upload
 - 作用：上传文件到 `db/{uuid}/temp`
-- 支持：`multipart/form-data` 或直接二进制（使用 `X-Filename` 指定文件名）
+- 支持：`multipart/form-data` 或直接二进制（使用 `X-Filename` 指定文件名；若未命名则使用 `noname.bin`）
 - 返回：200，`{ "saved": <count> }`
 
 7) 初始化完成
@@ -76,7 +76,7 @@
 	- 非 `npz/markednpz` 会先转为 `npz`（当前仅改后缀）并保存到 `db/{uuid}/npz`
 	- 非 `png` 会转为 `png` 并保存到 `db/{uuid}/png`
 	- `markednpz` 额外输出一张到 `db/{uuid}/markedpng`
-	- `temp` 文件夹会重命名为 `png/npz/markednpz/dcm/nii`
+	- `temp` 文件夹会重命名为 `png/npz/dcm/nii`（`markednpz` 也保存到 `npz`）
 	- `project.json` 的 `raw` 更新为传入参数；若为 `dcm/nii`，对应字段设为 `raw`
 - 返回：200，`{ "status": "ok" }`
 
@@ -87,6 +87,14 @@
 8.1) 获取单张 png
 - 方法：GET /api/project/{uuid}/png/{filename}
 - 返回：200，PNG 文件（二进制）
+
+8.2) 获取 markedpng 列表
+- 方法：GET /api/project/{uuid}/markedpng
+- 返回：200，markedpng 文件名数组
+
+8.3) 获取单张 markedpng
+- 方法：GET /api/project/{uuid}/markedpng/{filename}
+- 返回：200，markedpng 文件（二进制）
 
 9.1) 下载 png
 - 方法：GET /api/project/{uuid}/download/png
