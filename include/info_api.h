@@ -532,11 +532,13 @@ inline void register_info_routes(crow::SimpleApp &app, InfoStore &store) {
             auto yr = extract_int_field(req.body, "semi-yR");
             if (!xl || !xr || !yl || !yr) throw std::runtime_error("invalid json");
             fs::path project_json = store.base_path / uuid / "project.json";
+            bool all_minus_one = (*xl == -1 && *xr == -1 && *yl == -1 && *yr == -1);
             update_project_json_fields(project_json, {
                 {"semi-xL", std::to_string(*xl)},
                 {"semi-xR", std::to_string(*xr)},
                 {"semi-yL", std::to_string(*yl)},
-                {"semi-yR", std::to_string(*yr)}
+                {"semi-yR", std::to_string(*yr)},
+                {"semi", all_minus_one ? "false" : "true"}
             });
             crow::response r{"{\"status\":\"ok\"}"};
             r.code = 200; set_json_headers(r); return r;

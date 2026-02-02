@@ -117,6 +117,7 @@
 10) 更新裁剪参数（semi）
 - 方法：PATCH /api/projects/{uuid}/semi
 - 请求体：`{ "semi-xL": int, "semi-xR": int, "semi-yL": int, "semi-yR": int }`
+- 规则：当四个参数均为 -1 时，将 `project.json` 的 `semi` 设为 `false`；否则设为 `true`
 - 返回：200，`{ "status": "ok" }`
 
 ## 请求/响应头
