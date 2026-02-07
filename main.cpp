@@ -4,9 +4,26 @@
 #include "info_store.h"
 #include "info_api.h"
 
-int main()
+int main(int argc, char **argv)
 {
     std::cout << "数据库软件运行后请勿手动修改数据库" << std::endl;
+    std::string onnx_path;
+    for (int i = 1; i < argc; ++i) {
+        std::string key = argv[i];
+        if (key == "--onnx") {
+            if (i + 1 >= argc) {
+                std::cerr << "错误: --onnx 参数缺少路径" << std::endl;
+                return 1;
+            }
+            onnx_path = argv[++i];
+        } else if (key == "--help" || key == "-h") {
+            std::cout << "用法: ./main [--onnx <model.onnx>]" << std::endl;
+            return 0;
+        }
+    }
+    if (onnx_path.empty()) {
+        std::cerr << "警告: 未选中onnx文件，无法使用推理功能！！！" << std::endl;
+    }
     crow::SimpleApp app;
 
     // 初始化数据库（若缺失则创建 db/info.json）
@@ -19,7 +36,7 @@ int main()
     }
 
     // 注册项目信息接口（所有路径前缀为 /api/）
-    register_info_routes(app, store);
+    register_info_routes(app, store, onnx_path);
 
     CROW_ROUTE(app, "/api/health")([](){
         crow::json::wvalue res;

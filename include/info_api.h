@@ -11,7 +11,9 @@
 #include <map>
 #include <vector>
 #include <algorithm>
+#include <cmath>
 #include <cctype>
+#include <onnxruntime/onnxruntime_cxx_api.h>
 #include "cnpy.h"
 #include "info_store.h"
 
@@ -379,6 +381,212 @@ static inline std::vector<int64_t> resize_mask_nearest_from_double(const std::ve
     return out;
 }
 
+static inline std::vector<int64_t> resize_mask_nearest_from_int(const std::vector<int64_t> &mask,
+                                                                 int height,
+                                                                 int width,
+                                                                 int size)
+{
+    std::vector<float> tmp(static_cast<size_t>(height) * width, 0.0f);
+    for (size_t i = 0; i < tmp.size(); ++i) {
+        tmp[i] = static_cast<float>(mask[i]);
+    }
+    cv::Mat src(height, width, CV_32FC1, tmp.data());
+    cv::Mat dst;
+    cv::resize(src, dst, cv::Size(size, size), 0, 0, cv::INTER_NEAREST);
+    std::vector<int64_t> out(static_cast<size_t>(size) * size, 0);
+    const float *p = dst.ptr<float>();
+    for (size_t i = 0; i < out.size(); ++i) {
+        out[i] = static_cast<int64_t>(std::lround(p[i]));
+    }
+    return out;
+}
+
+static inline void normalize_image_inplace(std::vector<double> &image)
+{
+    double max_val = 0.0;
+    for (double v : image) {
+        if (v > max_val) max_val = v;
+    }
+    if (max_val > 1.0) {
+        for (double &v : image) {
+            v /= 255.0;
+        }
+    }
+}
+
+static inline std::vector<double> resize_image(const std::vector<double> &image,
+                                                int height,
+                                                int width,
+                                                int size)
+{
+    cv::Mat src(height, width, CV_64FC1, const_cast<double *>(image.data()));
+    cv::Mat dst;
+    cv::resize(src, dst, cv::Size(size, size), 0, 0, cv::INTER_LINEAR);
+    std::vector<double> out(static_cast<size_t>(size) * size, 0.0);
+    std::memcpy(out.data(), dst.ptr<double>(), out.size() * sizeof(double));
+    return out;
+}
+
+static inline std::vector<float> make_input_tensor_chw(const std::vector<double> &image,
+                                                       int size,
+                                                       int channels)
+{
+    std::vector<float> input(static_cast<size_t>(channels) * size * size, 0.0f);
+    const size_t hw = static_cast<size_t>(size) * size;
+    for (int c = 0; c < channels; ++c) {
+        for (size_t i = 0; i < hw; ++i) {
+            input[static_cast<size_t>(c) * hw + i] = static_cast<float>(image[i]);
+        }
+    }
+    return input;
+}
+
+static inline std::vector<int64_t> run_onnx_inference_mask(const fs::path &onnx_path,
+                                                           const cnpy::NpyArray &raw_arr,
+                                                           int img_size,
+                                                           int out_size)
+{
+    int height = 0;
+    int width = 0;
+    std::vector<double> raw = npy_to_double_2d(raw_arr, height, width);
+    normalize_image_inplace(raw);
+    std::vector<double> resized = resize_image(raw, height, width, img_size);
+    std::vector<float> input_chw = make_input_tensor_chw(resized, img_size, 3);
+
+    Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "medimg_infer");
+    Ort::SessionOptions opts;
+    opts.SetIntraOpNumThreads(1);
+    opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_EXTENDED);
+    Ort::Session session(env, onnx_path.string().c_str(), opts);
+
+    Ort::AllocatorWithDefaultOptions allocator;
+    Ort::AllocatedStringPtr input_name = session.GetInputNameAllocated(0, allocator);
+    std::vector<int64_t> input_shape = {1, 3, img_size, img_size};
+    Ort::MemoryInfo mem_info = Ort::MemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
+    Ort::Value input_tensor = Ort::Value::CreateTensor<float>(
+        mem_info, input_chw.data(), input_chw.size(), input_shape.data(), input_shape.size());
+
+    size_t output_count = session.GetOutputCount();
+    std::vector<Ort::AllocatedStringPtr> output_names;
+    std::vector<const char *> output_name_cstrs;
+    output_names.reserve(output_count);
+    output_name_cstrs.reserve(output_count);
+    for (size_t i = 0; i < output_count; ++i) {
+        output_names.emplace_back(session.GetOutputNameAllocated(i, allocator));
+        output_name_cstrs.push_back(output_names.back().get());
+    }
+
+    const char *input_name_cstr = input_name.get();
+    std::vector<Ort::Value> outputs = session.Run(Ort::RunOptions{nullptr},
+                                                  &input_name_cstr,
+                                                  &input_tensor,
+                                                  1,
+                                                  output_name_cstrs.data(),
+                                                  output_count);
+    if (outputs.empty()) {
+        throw std::runtime_error("ONNX输出为空");
+    }
+
+    Ort::Value &out = outputs[0];
+    auto out_info = out.GetTensorTypeAndShapeInfo();
+    auto out_shape = out_info.GetShape();
+    if (out_shape.size() != 4) {
+        throw std::runtime_error("ONNX输出维度不符合预期");
+    }
+
+    int64_t out_n = out_shape[0];
+    int64_t out_c = out_shape[1];
+    int64_t out_h = out_shape[2];
+    int64_t out_w = out_shape[3];
+    if (out_n != 1) {
+        throw std::runtime_error("ONNX输出batch不为1");
+    }
+
+    auto half_to_float = [](uint16_t h) -> float {
+        uint32_t sign = (h & 0x8000u) << 16;
+        uint32_t exp = (h & 0x7C00u) >> 10;
+        uint32_t mant = (h & 0x03FFu);
+        uint32_t f;
+        if (exp == 0) {
+            if (mant == 0) {
+                f = sign;
+            } else {
+                exp = 1;
+                while ((mant & 0x0400u) == 0) {
+                    mant <<= 1;
+                    exp--;
+                }
+                mant &= 0x03FFu;
+                exp = exp + (127 - 15);
+                f = sign | (exp << 23) | (mant << 13);
+            }
+        } else if (exp == 0x1F) {
+            f = sign | 0x7F800000u | (mant << 13);
+        } else {
+            exp = exp + (127 - 15);
+            f = sign | (exp << 23) | (mant << 13);
+        }
+        float out_f;
+        std::memcpy(&out_f, &f, sizeof(float));
+        return out_f;
+    };
+
+    std::vector<float> out_fallback;
+    const float *out_data = nullptr;
+    auto out_type = out_info.GetElementType();
+    if (out_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+        out_data = out.GetTensorData<float>();
+    } else if (out_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
+        const uint16_t *src = out.GetTensorData<uint16_t>();
+        size_t total = static_cast<size_t>(out_n * out_c * out_h * out_w);
+        out_fallback.resize(total);
+        for (size_t i = 0; i < total; ++i) {
+            out_fallback[i] = half_to_float(src[i]);
+        }
+        out_data = out_fallback.data();
+    } else {
+        throw std::runtime_error("不支持的ONNX输出数据类型");
+    }
+
+    std::vector<int64_t> pred(static_cast<size_t>(out_h) * out_w, 0);
+    float out_min = out_data[0];
+    float out_max = out_data[0];
+    size_t total_vals = static_cast<size_t>(out_n * out_c * out_h * out_w);
+    for (size_t i = 1; i < total_vals; ++i) {
+        float v = out_data[i];
+        if (v < out_min) out_min = v;
+        if (v > out_max) out_max = v;
+    }
+
+    if (out_c == 1) {
+        bool already_prob = (out_min >= 0.0f && out_max <= 1.0f);
+        for (int64_t y = 0; y < out_h; ++y) {
+            for (int64_t x = 0; x < out_w; ++x) {
+                float v = out_data[y * out_w + x];
+                float prob = already_prob ? v : (1.0f / (1.0f + std::exp(-v)));
+                pred[static_cast<size_t>(y) * out_w + x] = (prob >= 0.5f) ? 1 : 0;
+            }
+        }
+    } else {
+        for (int64_t y = 0; y < out_h; ++y) {
+            for (int64_t x = 0; x < out_w; ++x) {
+                int64_t best_c = 0;
+                float best_v = out_data[(0 * out_c + 0) * out_h * out_w + y * out_w + x];
+                for (int64_t c = 1; c < out_c; ++c) {
+                    float v = out_data[(0 * out_c + c) * out_h * out_w + y * out_w + x];
+                    if (v > best_v) {
+                        best_v = v;
+                        best_c = c;
+                    }
+                }
+                pred[static_cast<size_t>(y) * out_w + x] = best_c;
+            }
+        }
+    }
+
+    return resize_mask_nearest_from_int(pred, static_cast<int>(out_h), static_cast<int>(out_w), out_size);
+}
+
 static inline void save_npz_with_same_keys(const std::string &src_npz,
                                            const std::string &out_npz,
                                            const std::vector<int64_t> &pred,
@@ -568,7 +776,7 @@ static inline fs::path create_zip_store(const fs::path &dir, const std::string &
     return tmp;
 }
 
-inline void register_info_routes(crow::SimpleApp &app, InfoStore &store) {
+inline void register_info_routes(crow::SimpleApp &app, InfoStore &store, const std::string &onnx_path) {
     // 列表
     CROW_ROUTE(app, "/api/projects/info.json").methods(crow::HTTPMethod::GET)([&store]() {
         try {
@@ -747,9 +955,15 @@ inline void register_info_routes(crow::SimpleApp &app, InfoStore &store) {
     });
 
     // 开始推理（处理 npz）
-    CROW_ROUTE(app, "/api/project/<string>/start_analysis").methods(crow::HTTPMethod::POST)([&store](const crow::request &req, const std::string &uuid){
+    CROW_ROUTE(app, "/api/project/<string>/start_analysis").methods(crow::HTTPMethod::POST)([&store, onnx_path](const crow::request &req, const std::string &uuid){
         try {
             if (!store.exists(uuid)) throw std::runtime_error("project not found");
+            if (onnx_path.empty()) {
+                throw std::runtime_error("未指定onnx文件，无法使用推理功能");
+            }
+            if (!fs::exists(onnx_path)) {
+                throw std::runtime_error("onnx文件不存在: " + onnx_path);
+            }
             auto mode = extract_string_field(req.body, "mode");
             if (!mode) mode = extract_string_field(req.body, "PD");
             if (!mode) mode = extract_string_field(req.body, "type");
@@ -785,17 +999,18 @@ inline void register_info_routes(crow::SimpleApp &app, InfoStore &store) {
             fs::create_directories(processed_nii_dir);
 
             const int out_size = 512;
+            const int img_size = 224;
             for (const auto &src : npz_files) {
                 cnpy::npz_t npz = cnpy::npz_load(src.string());
-                const cnpy::NpyArray *label_arr = find_npz_array(npz, {"label", "mask", "seg", "annotation", "gt"});
-
-                std::vector<int64_t> pred(static_cast<size_t>(out_size) * out_size, 0);
-                if (label_arr && label_arr->shape.size() == 2) {
-                    int lh = 0;
-                    int lw = 0;
-                    std::vector<double> lab = npy_to_double_2d(*label_arr, lh, lw);
-                    pred = resize_mask_nearest_from_double(lab, lh, lw, out_size);
+                const cnpy::NpyArray *raw_arr = find_npz_array(npz, {"image", "img", "raw", "ct", "data", "slice", "input"});
+                if (!raw_arr) {
+                    raw_arr = &npz.begin()->second;
                 }
+                if (!raw_arr || raw_arr->shape.size() != 2) {
+                    throw std::runtime_error("npz中未找到2D原始图像");
+                }
+
+                std::vector<int64_t> pred = run_onnx_inference_mask(onnx_path, *raw_arr, img_size, out_size);
 
                 bool has_crop = (mode_val == "semi") && is_valid_crop(semi_xL, semi_xR, semi_yL, semi_yR, out_size, out_size);
                 int crop_xL = has_crop ? semi_xL : -1;

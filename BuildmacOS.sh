@@ -31,11 +31,34 @@ if command -v pkg-config >/dev/null 2>&1; then
   fi
 fi
 
-CXX=clang++
-CXXFLAGS="-std=c++17 -stdlib=libc++ -g ${EXTRA_INCLUDES} -I./include -I./cnpy ${OPENCV_CFLAGS}"
+# ONNX Runtime flags
+ONNX_CFLAGS=""
+ONNX_LIBS=""
+if command -v pkg-config >/dev/null 2>&1; then
+  if pkg-config --exists onnxruntime; then
+    ONNX_CFLAGS="$(pkg-config --cflags onnxruntime)"
+    ONNX_LIBS="$(pkg-config --libs onnxruntime)"
+  fi
+fi
 
-echo "$CXX $CXXFLAGS main.cpp cnpy/cnpy.cpp -o main ${OPENCV_LIBS} -lz"
-$CXX $CXXFLAGS main.cpp cnpy/cnpy.cpp -o main ${OPENCV_LIBS} -lz
+if [ -z "${ONNX_CFLAGS}" ] && [ -n "${BREW_PREFIX}" ]; then
+  if brew --prefix onnxruntime >/dev/null 2>&1; then
+    ONNX_PREFIX="$(brew --prefix onnxruntime)"
+    ONNX_CFLAGS="-I${ONNX_PREFIX}/include"
+    ONNX_LIBS="-L${ONNX_PREFIX}/lib -lonnxruntime"
+  fi
+fi
+
+if [ -z "${ONNX_CFLAGS}" ]; then
+  echo "ERROR: ONNX Runtime headers not found. Please install onnxruntime (brew install onnxruntime) or set pkg-config." >&2
+  exit 1
+fi
+
+CXX=clang++
+CXXFLAGS="-std=c++17 -stdlib=libc++ -g ${EXTRA_INCLUDES} -I./include -I./cnpy ${OPENCV_CFLAGS} ${ONNX_CFLAGS}"
+
+echo "$CXX $CXXFLAGS main.cpp cnpy/cnpy.cpp -o main ${OPENCV_LIBS} ${ONNX_LIBS} -lz"
+$CXX $CXXFLAGS main.cpp cnpy/cnpy.cpp -o main ${OPENCV_LIBS} ${ONNX_LIBS} -lz
 
 echo "哈基米南北绿豆!!!!!!!!"
 echo "Build complete: ./main"
