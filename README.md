@@ -53,7 +53,8 @@ db/
    │  │  ├─ *-PD.dcm
    │  │  └─ *-PD.dcm
    │  ├─ nii-PD         # 推理后的npz转换为nii（前端需求时才转换）
-   │  ├─ 3d             # 推理后生成的3d模型
+   │  ├─ 3d/            # 推理后生成的3d模型
+   │  ├─ OG3d/          # 推理后生成的3d模型（原始）
    │  └─ project.json   # 存储了当前project的所有状态的json
    └ info.json          # 存储了当前database的所有project的json
 ```

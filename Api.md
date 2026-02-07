@@ -107,12 +107,10 @@
 
 9.3) 下载 dcm
 - 方法：GET /api/project/{uuid}/download/dcm
-- 说明：若 `project.json` 的 `dcm` 为 `false`，先执行 `npz2dcm`（当前仅改后缀）
 - 返回：ZIP（存储模式）
 
 9.4) 下载 nii
 - 方法：GET /api/project/{uuid}/download/nii
-- 说明：若 `project.json` 的 `nii` 为 `false`，先执行 `npz2nii`（当前仅改后缀）
 - 返回：ZIP（存储模式）
 
 10) 更新裁剪参数（semi）
@@ -145,12 +143,24 @@
 
 15) 下载处理过的 dcm
 - 方法：GET /api/project/{uuid}/download/processed/dcm
-- 说明：若 `project.json` 的 `PD-dcm` 为 `false`，先执行 `npz2dcm`（当前仅改后缀）
 - 返回：ZIP（存储模式）
 
 16) 下载处理过的 nii
 - 方法：GET /api/project/{uuid}/download/processed/nii
-- 说明：若 `project.json` 的 `PD-nii` 为 `false`，先执行 `npz2nii`（当前仅改后缀）
+- 返回：ZIP（存储模式）
+
+17) 转换为 3d 模型
+- 方法：POST /api/project/{uuid}/to_3d_model
+- 说明：使用 `db/{uuid}/processed/npzs` 生成 3d 模型，保存到 `db/{uuid}/3d`
+- 说明：若 `project.json` 的 `raw` 为 `markednpz`，额外生成原始 3d 模型到 `db/{uuid}/OG3d`
+- 返回：200，`{ "status": "ok" }`
+
+18) 下载 3d 模型
+- 方法：GET /api/project/{uuid}/download/3d
+- 返回：ZIP（存储模式）
+
+19) 下载原始 3d 模型
+- 方法：GET /api/project/{uuid}/download/OG3d
 - 返回：ZIP（存储模式）
 
 ## 请求/响应头

@@ -16,6 +16,7 @@
 #include <onnxruntime/onnxruntime_cxx_api.h>
 #include "cnpy.h"
 #include "info_store.h"
+#include "npz_to_glb.h"
 
 inline void set_json_headers(crow::response &r) {
     r.set_header("Content-Type", "application/json");
@@ -1231,23 +1232,7 @@ inline void register_info_routes(crow::SimpleApp &app, InfoStore &store, const s
     CROW_ROUTE(app, "/api/project/<string>/download/dcm").methods(crow::HTTPMethod::GET)([&store](const std::string &uuid){
         try {
             if (!store.exists(uuid)) throw std::runtime_error("project not found");
-            fs::path project_dir = store.base_path / uuid;
-            fs::path project_json = project_dir / "project.json";
-            std::string json = read_text_file(project_json);
-            if (json.find("\"dcm\": false") != std::string::npos) {
-                std::cout << "npz2dcm尚未开发，目前仅修改后缀" << std::endl;
-                fs::path npz_dir = project_dir / "npz";
-                fs::path dcm_dir = project_dir / "dcm";
-                fs::create_directories(dcm_dir);
-                for (const auto &src : list_files(npz_dir)) {
-                    fs::path dst = dcm_dir / (src.stem().string() + ".dcm");
-                    std::error_code ec;
-                    fs::copy_file(src, dst, fs::copy_options::overwrite_existing, ec);
-                    if (ec) throw std::runtime_error("npz2dcm 复制失败: " + ec.message());
-                }
-                update_project_json_fields(project_json, {{"dcm", "true"}});
-            }
-            fs::path dir = project_dir / "dcm";
+            fs::path dir = store.base_path / uuid / "dcm";
             auto zip_path = create_zip_store(dir, uuid + "_dcm.zip");
             crow::response r{read_text_file(zip_path)};
             r.set_header("Content-Type", "application/zip");
@@ -1263,23 +1248,7 @@ inline void register_info_routes(crow::SimpleApp &app, InfoStore &store, const s
     CROW_ROUTE(app, "/api/project/<string>/download/nii").methods(crow::HTTPMethod::GET)([&store](const std::string &uuid){
         try {
             if (!store.exists(uuid)) throw std::runtime_error("project not found");
-            fs::path project_dir = store.base_path / uuid;
-            fs::path project_json = project_dir / "project.json";
-            std::string json = read_text_file(project_json);
-            if (json.find("\"nii\": false") != std::string::npos) {
-                std::cout << "npz2nii尚未开发，目前仅修改后缀" << std::endl;
-                fs::path npz_dir = project_dir / "npz";
-                fs::path nii_dir = project_dir / "nii";
-                fs::create_directories(nii_dir);
-                for (const auto &src : list_files(npz_dir)) {
-                    fs::path dst = nii_dir / (src.stem().string() + ".nii");
-                    std::error_code ec;
-                    fs::copy_file(src, dst, fs::copy_options::overwrite_existing, ec);
-                    if (ec) throw std::runtime_error("npz2nii 复制失败: " + ec.message());
-                }
-                update_project_json_fields(project_json, {{"nii", "true"}});
-            }
-            fs::path dir = project_dir / "nii";
+            fs::path dir = store.base_path / uuid / "nii";
             auto zip_path = create_zip_store(dir, uuid + "_nii.zip");
             crow::response r{read_text_file(zip_path)};
             r.set_header("Content-Type", "application/zip");
@@ -1327,23 +1296,7 @@ inline void register_info_routes(crow::SimpleApp &app, InfoStore &store, const s
     CROW_ROUTE(app, "/api/project/<string>/download/processed/dcm").methods(crow::HTTPMethod::GET)([&store](const std::string &uuid){
         try {
             if (!store.exists(uuid)) throw std::runtime_error("project not found");
-            fs::path project_dir = store.base_path / uuid;
-            fs::path project_json = project_dir / "project.json";
-            std::string json = read_text_file(project_json);
-            if (json.find("\"PD-dcm\": false") != std::string::npos) {
-                std::cout << "npz2dcm尚未开发，目前仅修改后缀" << std::endl;
-                fs::path npz_dir = project_dir / "processed" / "npzs";
-                fs::path dcm_dir = project_dir / "processed" / "dcm";
-                fs::create_directories(dcm_dir);
-                for (const auto &src : list_files(npz_dir)) {
-                    fs::path dst = dcm_dir / (src.stem().string() + ".dcm");
-                    std::error_code ec;
-                    fs::copy_file(src, dst, fs::copy_options::overwrite_existing, ec);
-                    if (ec) throw std::runtime_error("npz2dcm 复制失败: " + ec.message());
-                }
-                update_project_json_fields(project_json, {{"PD-dcm", "true"}});
-            }
-            fs::path dir = project_dir / "processed" / "dcm";
+            fs::path dir = store.base_path / uuid / "processed" / "dcm";
             auto zip_path = create_zip_store(dir, uuid + "_processed_dcm.zip");
             crow::response r{read_text_file(zip_path)};
             r.set_header("Content-Type", "application/zip");
@@ -1359,27 +1312,86 @@ inline void register_info_routes(crow::SimpleApp &app, InfoStore &store, const s
     CROW_ROUTE(app, "/api/project/<string>/download/processed/nii").methods(crow::HTTPMethod::GET)([&store](const std::string &uuid){
         try {
             if (!store.exists(uuid)) throw std::runtime_error("project not found");
-            fs::path project_dir = store.base_path / uuid;
-            fs::path project_json = project_dir / "project.json";
-            std::string json = read_text_file(project_json);
-            if (json.find("\"PD-nii\": false") != std::string::npos) {
-                std::cout << "npz2nii尚未开发，目前仅修改后缀" << std::endl;
-                fs::path npz_dir = project_dir / "processed" / "npzs";
-                fs::path nii_dir = project_dir / "processed" / "nii";
-                fs::create_directories(nii_dir);
-                for (const auto &src : list_files(npz_dir)) {
-                    fs::path dst = nii_dir / (src.stem().string() + ".nii");
-                    std::error_code ec;
-                    fs::copy_file(src, dst, fs::copy_options::overwrite_existing, ec);
-                    if (ec) throw std::runtime_error("npz2nii 复制失败: " + ec.message());
-                }
-                update_project_json_fields(project_json, {{"PD-nii", "true"}});
-            }
-            fs::path dir = project_dir / "processed" / "nii";
+            fs::path dir = store.base_path / uuid / "processed" / "nii";
             auto zip_path = create_zip_store(dir, uuid + "_processed_nii.zip");
             crow::response r{read_text_file(zip_path)};
             r.set_header("Content-Type", "application/zip");
             r.set_header("Content-Disposition", "attachment; filename=\"processed_nii.zip\"");
+            return r;
+        } catch (const std::exception &e) {
+            crow::response r{std::string("{\"error\":\"") + e.what() + "\"}"};
+            r.code = 400; set_json_headers(r); return r;
+        }
+    });
+
+    // 转换为 3d 模型
+    CROW_ROUTE(app, "/api/project/<string>/to_3d_model").methods(crow::HTTPMethod::POST)([&store](const std::string &uuid){
+        try {
+            if (!store.exists(uuid)) throw std::runtime_error("project not found");
+            fs::path project_dir = store.base_path / uuid;
+            fs::path project_json = project_dir / "project.json";
+            std::string json = read_text_file(project_json);
+
+            fs::path processed_npz_dir = project_dir / "processed" / "npzs";
+            if (list_files(processed_npz_dir).empty()) {
+                throw std::runtime_error("processed npz 为空");
+            }
+
+            fs::path out_dir = project_dir / "3d";
+            std::error_code ec;
+            fs::remove_all(out_dir, ec);
+            fs::create_directories(out_dir);
+
+            npz_to_glb::Options opts;
+            opts.use_raw_threshold = true;
+            fs::path out_glb = out_dir / "model.glb";
+            npz_to_glb::convert_directory_to_glb(processed_npz_dir, out_glb, opts);
+
+            auto raw_val = extract_string_field(json, "raw");
+            if (raw_val && to_lower_copy(*raw_val) == "markednpz") {
+                fs::path og_dir = project_dir / "OG3d";
+                fs::remove_all(og_dir, ec);
+                fs::create_directories(og_dir);
+                fs::path og_glb = og_dir / "model.glb";
+                fs::path raw_npz_dir = project_dir / "npz";
+                npz_to_glb::convert_directory_to_glb(raw_npz_dir, og_glb, opts);
+            }
+
+            update_project_json_fields(project_json, {{"PD-3d", "true"}});
+
+            crow::response r{"{\"status\":\"ok\"}"};
+            r.code = 200; set_json_headers(r); return r;
+        } catch (const std::exception &e) {
+            crow::response r{std::string("{\"error\":\"") + e.what() + "\"}"};
+            r.code = 400; set_json_headers(r); return r;
+        }
+    });
+
+    // 下载 3d 模型
+    CROW_ROUTE(app, "/api/project/<string>/download/3d").methods(crow::HTTPMethod::GET)([&store](const std::string &uuid){
+        try {
+            if (!store.exists(uuid)) throw std::runtime_error("project not found");
+            fs::path dir = store.base_path / uuid / "3d";
+            auto zip_path = create_zip_store(dir, uuid + "_3d.zip");
+            crow::response r{read_text_file(zip_path)};
+            r.set_header("Content-Type", "application/zip");
+            r.set_header("Content-Disposition", "attachment; filename=\"3d.zip\"");
+            return r;
+        } catch (const std::exception &e) {
+            crow::response r{std::string("{\"error\":\"") + e.what() + "\"}"};
+            r.code = 400; set_json_headers(r); return r;
+        }
+    });
+
+    // 下载 OG3d 模型
+    CROW_ROUTE(app, "/api/project/<string>/download/OG3d").methods(crow::HTTPMethod::GET)([&store](const std::string &uuid){
+        try {
+            if (!store.exists(uuid)) throw std::runtime_error("project not found");
+            fs::path dir = store.base_path / uuid / "OG3d";
+            auto zip_path = create_zip_store(dir, uuid + "_OG3d.zip");
+            crow::response r{read_text_file(zip_path)};
+            r.set_header("Content-Type", "application/zip");
+            r.set_header("Content-Disposition", "attachment; filename=\"OG3d.zip\"");
             return r;
         } catch (const std::exception &e) {
             crow::response r{std::string("{\"error\":\"") + e.what() + "\"}"};
@@ -1489,6 +1501,15 @@ inline void register_info_routes(crow::SimpleApp &app, InfoStore &store, const s
     });
 
     CROW_ROUTE(app, "/api/project/<string>/start_analysis").methods(crow::HTTPMethod::OPTIONS)([](const std::string &){
+        crow::response r;
+        r.set_header("Access-Control-Allow-Origin", "*");
+        r.set_header("Access-Control-Allow-Methods", "POST, OPTIONS");
+        r.set_header("Access-Control-Allow-Headers", "Content-Type");
+        r.code = 204;
+        return r;
+    });
+
+    CROW_ROUTE(app, "/api/project/<string>/to_3d_model").methods(crow::HTTPMethod::OPTIONS)([](const std::string &){
         crow::response r;
         r.set_header("Access-Control-Allow-Origin", "*");
         r.set_header("Access-Control-Allow-Methods", "POST, OPTIONS");
