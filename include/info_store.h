@@ -274,6 +274,7 @@ private:
         s += "  \"semi-xR\": -1,\n";
         s += "  \"semi-yL\": -1,\n";
         s += "  \"semi-yR\": -1,\n";
+        s += "  \"processed\": false,\n";
         s += "  \"PD\": false,\n";
         s += "  \"PD-nii\": false,\n";
         s += "  \"PD-dcm\": false,\n";

@@ -19,6 +19,7 @@
 - `semi-xR`: int（-1为不修改）（增强后取用的x轴像素的起终点）
 - `semi-yL`: int（-1为不修改）（增强后取用的y轴像素的起始点）
 - `semi-yR`: int（-1为不修改）（增强后取用的y轴像素的起终点）
+- `processed`: false、raw、semi（是否已处理完成，raw/semi 分别表示处理模式）
 - `PD`: false、raw、semi（是否经过推理，raw使用raw进行推理、semi使用增强过的文件进行推理）
 - `PD-nii`: true、false（推理后文件是否转为nii，每次推理时删除转换后文件并改为false）
 - `PD-dcm`: true、false（推理后文件是否转为dcm，每次推理时删除转换后文件并改为false）
@@ -119,6 +120,38 @@
 - 请求体：`{ "semi-xL": int, "semi-xR": int, "semi-yL": int, "semi-yR": int }`
 - 规则：当四个参数均为 -1 时，将 `project.json` 的 `semi` 设为 `false`；否则设为 `true`
 - 返回：200，`{ "status": "ok" }`
+
+11) 开始处理（推理）
+- 方法：POST /api/project/{uuid}/start_analysis
+- 请求体：`{ "mode": "raw|semi" }`（也兼容 `PD` 或 `type`）
+- 说明：处理完成后保存到 `db/{uuid}/processed/npzs` 与 `db/{uuid}/processed/pngs`，并将 `project.json` 的 `processed` 设为 `raw` 或 `semi`
+- 返回：200，`{ "status": "ok" }`
+
+12) 获取处理过的图片列表
+- 方法：GET /api/project/{uuid}/processed/png
+- 返回：200，PNG 文件名数组
+
+12.1) 获取单张处理过的图片
+- 方法：GET /api/project/{uuid}/processed/png/{filename}
+- 返回：200，PNG 文件（二进制）
+
+13) 下载处理过的图片
+- 方法：GET /api/project/{uuid}/download/processed/png
+- 返回：ZIP（存储模式）
+
+14) 下载处理过的 npz
+- 方法：GET /api/project/{uuid}/download/processed/npz
+- 返回：ZIP（存储模式）
+
+15) 下载处理过的 dcm
+- 方法：GET /api/project/{uuid}/download/processed/dcm
+- 说明：若 `project.json` 的 `PD-dcm` 为 `false`，先执行 `npz2dcm`（当前仅改后缀）
+- 返回：ZIP（存储模式）
+
+16) 下载处理过的 nii
+- 方法：GET /api/project/{uuid}/download/processed/nii
+- 说明：若 `project.json` 的 `PD-nii` 为 `false`，先执行 `npz2nii`（当前仅改后缀）
+- 返回：ZIP（存储模式）
 
 ## 请求/响应头
 - 请求：POST/PATCH 请使用 `Content-Type: application/json`

@@ -25,26 +25,20 @@ main.cpp 为主程序
 ```text
 db/
 └─ {project-UUID}/      # 使用UUID管理各个project
-   ├─ raw/              # 原始上传
-   │  ├─ temp/          # 临时文件缓存
-   │  ├─ pngs/
-   │  │  ├─ 1.png
-   │  │  ├─ *.png
-   │  │  └─ *.png
-   │  ├─ npzs/
-   │  │  ├─ 1.npz
-   │  │  ├─ *.npz
-   │  │  └─ *.npz
-   │  ├─ dcms/
-   │  │  ├─ 1.dcm
-   │  │  ├─ *.dcm
-   │  │  └─ *.dcm
-   │  └─ nii
-   ├─ semi-processed/   # 用户增强后的文件（也就是用于推理的文件）
-   │  └─ npzs/          # 前端传来参数后增强好的npz文件（供推理使用）
-   │     ├─ 1-semi.npz
-   │     ├─ *-semi.npz
-   │     └─ *-semi.npz
+   ├─ temp/          # 临时文件缓存
+   ├─ pngs/
+   │  ├─ 1.png
+   │  ├─ *.png
+   │  └─ *.png
+   ├─ npzs/
+   │  ├─ 1.npz
+   │  ├─ *.npz
+   │  └─ *.npz
+   ├─ dcms/
+   │  ├─ 1.dcm
+   │  ├─ *.dcm
+   │  └─ *.dcm
+   ├─ nii
    ├─ processed/        # 最终产物
    │  ├─ pngs/          # 推理后的图片（供前端显示）
    │  │  ├─ 1-PD.png

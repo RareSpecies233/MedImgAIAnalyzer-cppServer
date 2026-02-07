@@ -127,34 +127,106 @@ static inline void update_project_json_fields(const fs::path &project_json, cons
     write_text_file(project_json, json);
 }
 
-static inline cv::Mat npy_to_mat_8u(const cnpy::NpyArray &arr)
+static inline void ensure_project_json_field(const fs::path &project_json,
+                                             const std::string &key,
+                                             const std::string &value_literal)
 {
-    if (arr.word_size != sizeof(double) || arr.shape.size() != 2) {
-        throw std::runtime_error("Only 2D float64 supported");
+    std::string json = read_text_file(project_json);
+    std::string k = "\"" + key + "\"";
+    if (json.find(k) != std::string::npos) return;
+    auto pos = json.rfind('}');
+    if (pos == std::string::npos) throw std::runtime_error("project.json 字段格式错误");
+    std::string insert = ",\n  \"" + key + "\": " + value_literal + "\n";
+    json.insert(pos, insert);
+    write_text_file(project_json, json);
+}
+
+static inline std::vector<double> npy_to_double_2d(const cnpy::NpyArray &arr, int &height, int &width)
+{
+    if (arr.shape.size() != 2) {
+        throw std::runtime_error("Only 2D arrays supported");
     }
     const size_t h = arr.shape[0];
     const size_t w = arr.shape[1];
-    const double *data = arr.data<double>();
+    height = static_cast<int>(h);
+    width = static_cast<int>(w);
+    std::vector<double> out(h * w, 0.0);
 
-    cv::Mat img(static_cast<int>(h), static_cast<int>(w), CV_8UC1);
+    auto read_value = [&](size_t idx) -> double {
+        if (arr.word_size == sizeof(double)) {
+            return arr.data<double>()[idx];
+        }
+        if (arr.word_size == sizeof(float)) {
+            return static_cast<double>(arr.data<float>()[idx]);
+        }
+        if (arr.word_size == sizeof(uint8_t)) {
+            return static_cast<double>(arr.data<uint8_t>()[idx]);
+        }
+        if (arr.word_size == sizeof(uint16_t)) {
+            return static_cast<double>(arr.data<uint16_t>()[idx]);
+        }
+        if (arr.word_size == sizeof(int16_t)) {
+            return static_cast<double>(arr.data<int16_t>()[idx]);
+        }
+        if (arr.word_size == sizeof(int32_t)) {
+            return static_cast<double>(arr.data<int32_t>()[idx]);
+        }
+        throw std::runtime_error("Unsupported npy data type");
+    };
+
     if (arr.fortran_order) {
         for (size_t r = 0; r < h; ++r) {
             for (size_t c = 0; c < w; ++c) {
-                double v = data[c * h + r];
-                v = std::min(1.0, std::max(0.0, v));
-                img.at<uchar>(static_cast<int>(r), static_cast<int>(c)) = static_cast<uchar>(v * 255.0 + 0.5);
+                out[r * w + c] = read_value(c * h + r);
             }
         }
     } else {
         for (size_t r = 0; r < h; ++r) {
             for (size_t c = 0; c < w; ++c) {
-                double v = data[r * w + c];
+                out[r * w + c] = read_value(r * w + c);
+            }
+        }
+    }
+    return out;
+}
+
+static inline cv::Mat normalize_to_u8(const std::vector<double> &data, int height, int width)
+{
+    if (data.empty()) throw std::runtime_error("Empty array");
+    double min_v = data[0];
+    double max_v = data[0];
+    for (double v : data) {
+        if (v < min_v) min_v = v;
+        if (v > max_v) max_v = v;
+    }
+    const bool already_unit = (min_v >= 0.0 && max_v <= 1.0);
+    cv::Mat img(height, width, CV_8UC1);
+    for (int r = 0; r < height; ++r) {
+        for (int c = 0; c < width; ++c) {
+            double v = data[static_cast<size_t>(r) * width + c];
+            if (already_unit) {
                 v = std::min(1.0, std::max(0.0, v));
-                img.at<uchar>(static_cast<int>(r), static_cast<int>(c)) = static_cast<uchar>(v * 255.0 + 0.5);
+                img.at<uchar>(r, c) = static_cast<uchar>(v * 255.0 + 0.5);
+            } else if (max_v > min_v) {
+                double nv = (v - min_v) / (max_v - min_v);
+                nv = std::min(1.0, std::max(0.0, nv));
+                img.at<uchar>(r, c) = static_cast<uchar>(nv * 255.0 + 0.5);
+            } else {
+                img.at<uchar>(r, c) = static_cast<uchar>(std::min(255.0, std::max(0.0, v)));
             }
         }
     }
     return img;
+}
+
+static inline const cnpy::NpyArray *find_npz_array(const cnpy::npz_t &npz,
+                                                   const std::vector<std::string> &keys)
+{
+    for (const auto &k : keys) {
+        auto it = npz.find(k);
+        if (it != npz.end()) return &it->second;
+    }
+    return nullptr;
 }
 
 static inline void write_placeholder_png(const fs::path &out_path)
@@ -186,39 +258,271 @@ static inline void all2png_stub(const fs::path &src, const fs::path &dst)
     write_placeholder_png(dst);
 }
 
-static inline void convert_npz_to_pngs(const fs::path &npz_path, const fs::path &png_dir, const fs::path &marked_dir, bool marked)
+static inline void convert_npz_to_pngs(const fs::path &npz_path,
+                                       const fs::path &png_dir,
+                                       const fs::path &marked_dir,
+                                       bool marked,
+                                       bool write_raw_png = true,
+                                       const std::string &marked_suffix = "_marked")
 {
+    static const std::vector<std::string> kRawKeys = {
+        "image", "img", "raw", "ct", "data", "slice", "input"
+    };
+    static const std::vector<std::string> kAnnKeys = {
+        "label", "mask", "seg", "annotation", "gt"
+    };
+
     cnpy::npz_t npz = cnpy::npz_load(npz_path.string());
     if (npz.empty()) throw std::runtime_error("npz为空");
 
-    auto it = npz.begin();
-    const cnpy::NpyArray &arr_first = it->second;
-    cv::Mat img = npy_to_mat_8u(arr_first);
-    fs::create_directories(png_dir);
-    fs::path out_png = png_dir / (npz_path.stem().string() + ".png");
-    if (!cv::imwrite(out_png.string(), img)) throw std::runtime_error("写入png失败");
+    const cnpy::NpyArray *raw_arr = find_npz_array(npz, kRawKeys);
+    const cnpy::NpyArray *ann_arr = find_npz_array(npz, kAnnKeys);
+    if (!raw_arr) {
+        raw_arr = &npz.begin()->second;
+    }
+    if (!ann_arr) {
+        for (const auto &kv : npz) {
+            if (&kv.second != raw_arr) {
+                ann_arr = &kv.second;
+                break;
+            }
+        }
+    }
+
+    int h = 0;
+    int w = 0;
+    std::vector<double> raw_data = npy_to_double_2d(*raw_arr, h, w);
+    cv::Mat raw_u8 = normalize_to_u8(raw_data, h, w);
+
+    if (write_raw_png) {
+        fs::create_directories(png_dir);
+        fs::path out_png = png_dir / (npz_path.stem().string() + ".png");
+        if (!cv::imwrite(out_png.string(), raw_u8)) throw std::runtime_error("写入png失败");
+    }
 
     if (marked) {
         fs::create_directories(marked_dir);
-        cv::Mat mask;
-        if (++it != npz.end()) {
-            mask = npy_to_mat_8u(it->second);
+        std::vector<double> ann_data;
+        int ann_h = 0;
+        int ann_w = 0;
+        if (ann_arr) {
+            ann_data = npy_to_double_2d(*ann_arr, ann_h, ann_w);
         } else {
-            mask = img;
+            ann_h = h;
+            ann_w = w;
+            ann_data.assign(static_cast<size_t>(h) * w, 0.0);
         }
-        cv::Mat rgba(mask.rows, mask.cols, CV_8UC4, cv::Scalar(0, 0, 0, 0));
-        for (int r = 0; r < mask.rows; ++r) {
-            for (int c = 0; c < mask.cols; ++c) {
-                uchar v = mask.at<uchar>(r, c);
-                if (v == 0) {
-                    rgba.at<cv::Vec4b>(r, c) = cv::Vec4b(0, 0, 0, 0);
-                } else {
-                    rgba.at<cv::Vec4b>(r, c) = cv::Vec4b(255, 255, 255, 128);
+        if (ann_h != h || ann_w != w) {
+            throw std::runtime_error("标注尺寸与原图不一致");
+        }
+
+        const uchar alpha = 160;
+        cv::Mat rgba(h, w, CV_8UC4, cv::Scalar(0, 0, 0, 0));
+        for (int r = 0; r < h; ++r) {
+            for (int c = 0; c < w; ++c) {
+                double v = ann_data[static_cast<size_t>(r) * w + c];
+                if (v > 1.0) {
+                    rgba.at<cv::Vec4b>(r, c) = cv::Vec4b(0, 212, 255, alpha);
+                } else if (v > 0.0) {
+                    rgba.at<cv::Vec4b>(r, c) = cv::Vec4b(59, 59, 255, alpha);
                 }
             }
         }
-        fs::path out_marked = marked_dir / (npz_path.stem().string() + "_marked.png");
+        fs::path out_marked = marked_dir / (npz_path.stem().string() + marked_suffix + ".png");
         if (!cv::imwrite(out_marked.string(), rgba)) throw std::runtime_error("写入markedpng失败");
+    }
+}
+
+static inline bool is_valid_crop(int xL, int xR, int yL, int yR, int width, int height)
+{
+    return xL >= 0 && yL >= 0 && xR > xL && yR > yL && xR <= width && yR <= height;
+}
+
+template <typename T>
+static inline std::vector<T> crop2d(const T *src,
+                                    int height,
+                                    int width,
+                                    int xL,
+                                    int xR,
+                                    int yL,
+                                    int yR,
+                                    bool fortran_order)
+{
+    int out_w = xR - xL;
+    int out_h = yR - yL;
+    std::vector<T> out(static_cast<size_t>(out_h) * out_w);
+    for (int y = 0; y < out_h; ++y) {
+        for (int x = 0; x < out_w; ++x) {
+            int src_x = xL + x;
+            int src_y = yL + y;
+            size_t idx = fortran_order ? static_cast<size_t>(src_x) * height + src_y
+                                       : static_cast<size_t>(src_y) * width + src_x;
+            out[static_cast<size_t>(y) * out_w + x] = src[idx];
+        }
+    }
+    return out;
+}
+
+static inline std::vector<int64_t> resize_mask_nearest_from_double(const std::vector<double> &mask,
+                                                                    int height,
+                                                                    int width,
+                                                                    int size)
+{
+    cv::Mat src(height, width, CV_64FC1, const_cast<double *>(mask.data()));
+    cv::Mat dst;
+    cv::resize(src, dst, cv::Size(size, size), 0, 0, cv::INTER_NEAREST);
+    std::vector<int64_t> out(static_cast<size_t>(size) * size, 0);
+    const double *p = dst.ptr<double>();
+    for (size_t i = 0; i < out.size(); ++i) {
+        out[i] = static_cast<int64_t>(std::lround(p[i]));
+    }
+    return out;
+}
+
+static inline void save_npz_with_same_keys(const std::string &src_npz,
+                                           const std::string &out_npz,
+                                           const std::vector<int64_t> &pred,
+                                           int pred_h,
+                                           int pred_w,
+                                           const std::string &label_key,
+                                           int crop_xL,
+                                           int crop_xR,
+                                           int crop_yL,
+                                           int crop_yR)
+{
+    cnpy::npz_t npz = cnpy::npz_load(src_npz);
+    bool first = true;
+    bool has_valid_crop = false;
+    int crop_w = pred_w;
+    int crop_h = pred_h;
+
+    auto resolve_crop = [&](int width, int height) {
+        if (is_valid_crop(crop_xL, crop_xR, crop_yL, crop_yR, width, height)) {
+            has_valid_crop = true;
+            crop_w = crop_xR - crop_xL;
+            crop_h = crop_yR - crop_yL;
+        }
+    };
+
+    for (const auto &kv : npz) {
+        const std::string &key = kv.first;
+        const cnpy::NpyArray &arr = kv.second;
+        const std::string mode = first ? "w" : "a";
+        first = false;
+
+        if (key == label_key) {
+            if (arr.shape.size() != 2) throw std::runtime_error("label应为2D数组");
+            resolve_crop(static_cast<int>(arr.shape[1]), static_cast<int>(arr.shape[0]));
+            std::vector<size_t> shape = {static_cast<size_t>(crop_h), static_cast<size_t>(crop_w)};
+            std::vector<int64_t> out = pred;
+            if (has_valid_crop) {
+                out = crop2d(pred.data(), pred_h, pred_w, crop_xL, crop_xR, crop_yL, crop_yR, false);
+            }
+            switch (arr.word_size) {
+                case sizeof(double): {
+                    std::vector<double> tmp(out.size());
+                    for (size_t i = 0; i < out.size(); ++i) tmp[i] = static_cast<double>(out[i]);
+                    cnpy::npz_save(out_npz, key, tmp.data(), shape, mode);
+                    break;
+                }
+                case sizeof(float): {
+                    std::vector<float> tmp(out.size());
+                    for (size_t i = 0; i < out.size(); ++i) tmp[i] = static_cast<float>(out[i]);
+                    cnpy::npz_save(out_npz, key, tmp.data(), shape, mode);
+                    break;
+                }
+                case sizeof(uint16_t): {
+                    std::vector<uint16_t> tmp(out.size());
+                    for (size_t i = 0; i < out.size(); ++i) tmp[i] = static_cast<uint16_t>(out[i]);
+                    cnpy::npz_save(out_npz, key, tmp.data(), shape, mode);
+                    break;
+                }
+                case sizeof(uint8_t): {
+                    std::vector<uint8_t> tmp(out.size());
+                    for (size_t i = 0; i < out.size(); ++i) tmp[i] = static_cast<uint8_t>(out[i]);
+                    cnpy::npz_save(out_npz, key, tmp.data(), shape, mode);
+                    break;
+                }
+                default:
+                    throw std::runtime_error("不支持的label数据类型");
+            }
+            continue;
+        }
+
+        if (arr.shape.size() == 2) {
+            resolve_crop(static_cast<int>(arr.shape[1]), static_cast<int>(arr.shape[0]));
+            int height = static_cast<int>(arr.shape[0]);
+            int width = static_cast<int>(arr.shape[1]);
+            int out_h = has_valid_crop ? crop_h : height;
+            int out_w = has_valid_crop ? crop_w : width;
+            std::vector<size_t> shape = {static_cast<size_t>(out_h), static_cast<size_t>(out_w)};
+            switch (arr.word_size) {
+                case sizeof(double): {
+                    std::vector<double> out = has_valid_crop
+                                              ? crop2d(arr.data<double>(), height, width, crop_xL, crop_xR, crop_yL, crop_yR,
+                                                       arr.fortran_order)
+                                              : std::vector<double>(arr.data<double>(), arr.data<double>() + arr.num_vals);
+                    cnpy::npz_save(out_npz, key, out.data(), shape, mode);
+                    break;
+                }
+                case sizeof(float): {
+                    std::vector<float> out = has_valid_crop
+                                             ? crop2d(arr.data<float>(), height, width, crop_xL, crop_xR, crop_yL, crop_yR,
+                                                      arr.fortran_order)
+                                             : std::vector<float>(arr.data<float>(), arr.data<float>() + arr.num_vals);
+                    cnpy::npz_save(out_npz, key, out.data(), shape, mode);
+                    break;
+                }
+                case sizeof(uint16_t): {
+                    std::vector<uint16_t> out = has_valid_crop
+                                                ? crop2d(arr.data<uint16_t>(), height, width, crop_xL, crop_xR, crop_yL, crop_yR,
+                                                         arr.fortran_order)
+                                                : std::vector<uint16_t>(arr.data<uint16_t>(), arr.data<uint16_t>() + arr.num_vals);
+                    cnpy::npz_save(out_npz, key, out.data(), shape, mode);
+                    break;
+                }
+                case sizeof(uint8_t): {
+                    std::vector<uint8_t> out = has_valid_crop
+                                               ? crop2d(arr.data<uint8_t>(), height, width, crop_xL, crop_xR, crop_yL, crop_yR,
+                                                        arr.fortran_order)
+                                               : std::vector<uint8_t>(arr.data<uint8_t>(), arr.data<uint8_t>() + arr.num_vals);
+                    cnpy::npz_save(out_npz, key, out.data(), shape, mode);
+                    break;
+                }
+                default:
+                    throw std::runtime_error("不支持的npz数据类型");
+            }
+        } else {
+            switch (arr.word_size) {
+                case sizeof(double):
+                    cnpy::npz_save(out_npz, key, arr.data<double>(), arr.shape, mode);
+                    break;
+                case sizeof(float):
+                    cnpy::npz_save(out_npz, key, arr.data<float>(), arr.shape, mode);
+                    break;
+                case sizeof(uint16_t):
+                    cnpy::npz_save(out_npz, key, arr.data<uint16_t>(), arr.shape, mode);
+                    break;
+                case sizeof(uint8_t):
+                    cnpy::npz_save(out_npz, key, arr.data<uint8_t>(), arr.shape, mode);
+                    break;
+                default:
+                    throw std::runtime_error("不支持的npz数据类型");
+            }
+        }
+    }
+
+    if (npz.find(label_key) == npz.end()) {
+        int out_h = pred_h;
+        int out_w = pred_w;
+        std::vector<int64_t> out = pred;
+        if (is_valid_crop(crop_xL, crop_xR, crop_yL, crop_yR, pred_w, pred_h)) {
+            out_h = crop_yR - crop_yL;
+            out_w = crop_xR - crop_xL;
+            out = crop2d(pred.data(), pred_h, pred_w, crop_xL, crop_xR, crop_yL, crop_yR, false);
+        }
+        std::vector<size_t> shape = {static_cast<size_t>(out_h), static_cast<size_t>(out_w)};
+        cnpy::npz_save(out_npz, label_key, out.data(), shape, first ? "w" : "a");
     }
 }
 
@@ -408,7 +712,7 @@ inline void register_info_routes(crow::SimpleApp &app, InfoStore &store) {
                     }
                 } else if (raw == "markednpz") {
                     for (const auto &src : temp_files) {
-                        convert_npz_to_pngs(src, png_dir, marked_dir, true);
+                        convert_npz_to_pngs(src, png_dir, marked_dir, true, true, "_marked");
                     }
                 } else if (raw == "dcm" || raw == "nii") {
                     for (const auto &src : temp_files) {
@@ -433,6 +737,94 @@ inline void register_info_routes(crow::SimpleApp &app, InfoStore &store) {
             if (raw == "dcm") kv["dcm"] = "\"raw\"";
             if (raw == "nii") kv["nii"] = "\"raw\"";
             update_project_json_fields(project_json, kv);
+
+            crow::response r{"{\"status\":\"ok\"}"};
+            r.code = 200; set_json_headers(r); return r;
+        } catch (const std::exception &e) {
+            crow::response r{std::string("{\"error\":\"") + e.what() + "\"}"};
+            r.code = 400; set_json_headers(r); return r;
+        }
+    });
+
+    // 开始推理（处理 npz）
+    CROW_ROUTE(app, "/api/project/<string>/start_analysis").methods(crow::HTTPMethod::POST)([&store](const crow::request &req, const std::string &uuid){
+        try {
+            if (!store.exists(uuid)) throw std::runtime_error("project not found");
+            auto mode = extract_string_field(req.body, "mode");
+            if (!mode) mode = extract_string_field(req.body, "PD");
+            if (!mode) mode = extract_string_field(req.body, "type");
+            if (!mode) throw std::runtime_error("missing mode");
+            std::string mode_val = to_lower_copy(*mode);
+            if (mode_val != "raw" && mode_val != "semi") {
+                throw std::runtime_error("invalid mode");
+            }
+
+            fs::path project_dir = store.base_path / uuid;
+            fs::path project_json = project_dir / "project.json";
+            std::string json = read_text_file(project_json);
+            ensure_project_json_field(project_json, "processed", "false");
+            int semi_xL = extract_int_field(json, "semi-xL").value_or(-1);
+            int semi_xR = extract_int_field(json, "semi-xR").value_or(-1);
+            int semi_yL = extract_int_field(json, "semi-yL").value_or(-1);
+            int semi_yR = extract_int_field(json, "semi-yR").value_or(-1);
+
+            fs::path input_npz_dir = project_dir / "npz";
+            auto npz_files = list_files(input_npz_dir);
+            if (npz_files.empty()) throw std::runtime_error("npz为空");
+
+            fs::path processed_dir = project_dir / "processed";
+            fs::path processed_npz_dir = processed_dir / "npzs";
+            fs::path processed_png_dir = processed_dir / "pngs";
+            fs::path processed_dcm_dir = processed_dir / "dcm";
+            fs::path processed_nii_dir = processed_dir / "nii";
+            std::error_code ec;
+            fs::remove_all(processed_dir, ec);
+            fs::create_directories(processed_npz_dir);
+            fs::create_directories(processed_png_dir);
+            fs::create_directories(processed_dcm_dir);
+            fs::create_directories(processed_nii_dir);
+
+            const int out_size = 512;
+            for (const auto &src : npz_files) {
+                cnpy::npz_t npz = cnpy::npz_load(src.string());
+                const cnpy::NpyArray *label_arr = find_npz_array(npz, {"label", "mask", "seg", "annotation", "gt"});
+
+                std::vector<int64_t> pred(static_cast<size_t>(out_size) * out_size, 0);
+                if (label_arr && label_arr->shape.size() == 2) {
+                    int lh = 0;
+                    int lw = 0;
+                    std::vector<double> lab = npy_to_double_2d(*label_arr, lh, lw);
+                    pred = resize_mask_nearest_from_double(lab, lh, lw, out_size);
+                }
+
+                bool has_crop = (mode_val == "semi") && is_valid_crop(semi_xL, semi_xR, semi_yL, semi_yR, out_size, out_size);
+                int crop_xL = has_crop ? semi_xL : -1;
+                int crop_xR = has_crop ? semi_xR : -1;
+                int crop_yL = has_crop ? semi_yL : -1;
+                int crop_yR = has_crop ? semi_yR : -1;
+
+                fs::path out_npz = processed_npz_dir / (src.stem().string() + "-PD.npz");
+                save_npz_with_same_keys(src.string(),
+                                        out_npz.string(),
+                                        pred,
+                                        out_size,
+                                        out_size,
+                                        "label",
+                                        crop_xL,
+                                        crop_xR,
+                                        crop_yL,
+                                        crop_yR);
+
+                convert_npz_to_pngs(out_npz, processed_png_dir, processed_png_dir, true, false, "");
+            }
+
+            update_project_json_fields(project_json, {
+                {"processed", "\"" + mode_val + "\""},
+                {"PD", "\"" + mode_val + "\""},
+                {"PD-nii", "false"},
+                {"PD-dcm", "false"},
+                {"PD-3d", "false"}
+            });
 
             crow::response r{"{\"status\":\"ok\"}"};
             r.code = 200; set_json_headers(r); return r;
@@ -511,6 +903,46 @@ inline void register_info_routes(crow::SimpleApp &app, InfoStore &store) {
             }
             fs::path png_path = store.base_path / uuid / "markedpng" / filename;
             if (!fs::exists(png_path)) throw std::runtime_error("markedpng not found");
+            crow::response r{read_text_file(png_path)};
+            r.set_header("Content-Type", "image/png");
+            r.set_header("Access-Control-Allow-Origin", "*");
+            r.code = 200;
+            return r;
+        } catch (const std::exception &e) {
+            crow::response r{std::string("{\"error\":\"") + e.what() + "\"}"};
+            r.code = 400; set_json_headers(r); return r;
+        }
+    });
+
+    // 获取 processed png 列表
+    CROW_ROUTE(app, "/api/project/<string>/processed/png").methods(crow::HTTPMethod::GET)([&store](const std::string &uuid){
+        try {
+            if (!store.exists(uuid)) throw std::runtime_error("project not found");
+            fs::path png_dir = store.base_path / uuid / "processed" / "pngs";
+            auto files = list_files(png_dir);
+            std::string body = "[";
+            for (size_t i = 0; i < files.size(); ++i) {
+                body += "\"" + files[i].filename().string() + "\"";
+                if (i + 1 < files.size()) body += ",";
+            }
+            body += "]";
+            crow::response r{body};
+            r.code = 200; set_json_headers(r); return r;
+        } catch (const std::exception &e) {
+            crow::response r{std::string("{\"error\":\"") + e.what() + "\"}"};
+            r.code = 400; set_json_headers(r); return r;
+        }
+    });
+
+    // 获取单张 processed png
+    CROW_ROUTE(app, "/api/project/<string>/processed/png/<string>").methods(crow::HTTPMethod::GET)([&store](const std::string &uuid, const std::string &filename){
+        try {
+            if (!store.exists(uuid)) throw std::runtime_error("project not found");
+            if (filename.find("..") != std::string::npos || filename.find('/') != std::string::npos || filename.find('\\') != std::string::npos) {
+                throw std::runtime_error("invalid filename");
+            }
+            fs::path png_path = store.base_path / uuid / "processed" / "pngs" / filename;
+            if (!fs::exists(png_path)) throw std::runtime_error("processed png not found");
             crow::response r{read_text_file(png_path)};
             r.set_header("Content-Type", "image/png");
             r.set_header("Access-Control-Allow-Origin", "*");
@@ -644,6 +1076,102 @@ inline void register_info_routes(crow::SimpleApp &app, InfoStore &store) {
         }
     });
 
+    // 下载 processed png
+    CROW_ROUTE(app, "/api/project/<string>/download/processed/png").methods(crow::HTTPMethod::GET)([&store](const std::string &uuid){
+        try {
+            if (!store.exists(uuid)) throw std::runtime_error("project not found");
+            fs::path dir = store.base_path / uuid / "processed" / "pngs";
+            auto zip_path = create_zip_store(dir, uuid + "_processed_png.zip");
+            crow::response r{read_text_file(zip_path)};
+            r.set_header("Content-Type", "application/zip");
+            r.set_header("Content-Disposition", "attachment; filename=\"processed_png.zip\"");
+            return r;
+        } catch (const std::exception &e) {
+            crow::response r{std::string("{\"error\":\"") + e.what() + "\"}"};
+            r.code = 400; set_json_headers(r); return r;
+        }
+    });
+
+    // 下载 processed npz
+    CROW_ROUTE(app, "/api/project/<string>/download/processed/npz").methods(crow::HTTPMethod::GET)([&store](const std::string &uuid){
+        try {
+            if (!store.exists(uuid)) throw std::runtime_error("project not found");
+            fs::path dir = store.base_path / uuid / "processed" / "npzs";
+            auto zip_path = create_zip_store(dir, uuid + "_processed_npz.zip");
+            crow::response r{read_text_file(zip_path)};
+            r.set_header("Content-Type", "application/zip");
+            r.set_header("Content-Disposition", "attachment; filename=\"processed_npz.zip\"");
+            return r;
+        } catch (const std::exception &e) {
+            crow::response r{std::string("{\"error\":\"") + e.what() + "\"}"};
+            r.code = 400; set_json_headers(r); return r;
+        }
+    });
+
+    // 下载 processed dcm
+    CROW_ROUTE(app, "/api/project/<string>/download/processed/dcm").methods(crow::HTTPMethod::GET)([&store](const std::string &uuid){
+        try {
+            if (!store.exists(uuid)) throw std::runtime_error("project not found");
+            fs::path project_dir = store.base_path / uuid;
+            fs::path project_json = project_dir / "project.json";
+            std::string json = read_text_file(project_json);
+            if (json.find("\"PD-dcm\": false") != std::string::npos) {
+                std::cout << "npz2dcm尚未开发，目前仅修改后缀" << std::endl;
+                fs::path npz_dir = project_dir / "processed" / "npzs";
+                fs::path dcm_dir = project_dir / "processed" / "dcm";
+                fs::create_directories(dcm_dir);
+                for (const auto &src : list_files(npz_dir)) {
+                    fs::path dst = dcm_dir / (src.stem().string() + ".dcm");
+                    std::error_code ec;
+                    fs::copy_file(src, dst, fs::copy_options::overwrite_existing, ec);
+                    if (ec) throw std::runtime_error("npz2dcm 复制失败: " + ec.message());
+                }
+                update_project_json_fields(project_json, {{"PD-dcm", "true"}});
+            }
+            fs::path dir = project_dir / "processed" / "dcm";
+            auto zip_path = create_zip_store(dir, uuid + "_processed_dcm.zip");
+            crow::response r{read_text_file(zip_path)};
+            r.set_header("Content-Type", "application/zip");
+            r.set_header("Content-Disposition", "attachment; filename=\"processed_dcm.zip\"");
+            return r;
+        } catch (const std::exception &e) {
+            crow::response r{std::string("{\"error\":\"") + e.what() + "\"}"};
+            r.code = 400; set_json_headers(r); return r;
+        }
+    });
+
+    // 下载 processed nii
+    CROW_ROUTE(app, "/api/project/<string>/download/processed/nii").methods(crow::HTTPMethod::GET)([&store](const std::string &uuid){
+        try {
+            if (!store.exists(uuid)) throw std::runtime_error("project not found");
+            fs::path project_dir = store.base_path / uuid;
+            fs::path project_json = project_dir / "project.json";
+            std::string json = read_text_file(project_json);
+            if (json.find("\"PD-nii\": false") != std::string::npos) {
+                std::cout << "npz2nii尚未开发，目前仅修改后缀" << std::endl;
+                fs::path npz_dir = project_dir / "processed" / "npzs";
+                fs::path nii_dir = project_dir / "processed" / "nii";
+                fs::create_directories(nii_dir);
+                for (const auto &src : list_files(npz_dir)) {
+                    fs::path dst = nii_dir / (src.stem().string() + ".nii");
+                    std::error_code ec;
+                    fs::copy_file(src, dst, fs::copy_options::overwrite_existing, ec);
+                    if (ec) throw std::runtime_error("npz2nii 复制失败: " + ec.message());
+                }
+                update_project_json_fields(project_json, {{"PD-nii", "true"}});
+            }
+            fs::path dir = project_dir / "processed" / "nii";
+            auto zip_path = create_zip_store(dir, uuid + "_processed_nii.zip");
+            crow::response r{read_text_file(zip_path)};
+            r.set_header("Content-Type", "application/zip");
+            r.set_header("Content-Disposition", "attachment; filename=\"processed_nii.zip\"");
+            return r;
+        } catch (const std::exception &e) {
+            crow::response r{std::string("{\"error\":\"") + e.what() + "\"}"};
+            r.code = 400; set_json_headers(r); return r;
+        }
+    });
+
     // 删除
     CROW_ROUTE(app, "/api/projects/<string>").methods(crow::HTTPMethod::DELETE)([&store](const std::string &uuid){
         try {
@@ -745,6 +1273,15 @@ inline void register_info_routes(crow::SimpleApp &app, InfoStore &store) {
         return r;
     });
 
+    CROW_ROUTE(app, "/api/project/<string>/start_analysis").methods(crow::HTTPMethod::OPTIONS)([](const std::string &){
+        crow::response r;
+        r.set_header("Access-Control-Allow-Origin", "*");
+        r.set_header("Access-Control-Allow-Methods", "POST, OPTIONS");
+        r.set_header("Access-Control-Allow-Headers", "Content-Type");
+        r.code = 204;
+        return r;
+    });
+
     CROW_ROUTE(app, "/api/project/<string>/png").methods(crow::HTTPMethod::OPTIONS)([](const std::string &){
         crow::response r;
         r.set_header("Access-Control-Allow-Origin", "*");
@@ -781,6 +1318,24 @@ inline void register_info_routes(crow::SimpleApp &app, InfoStore &store) {
         return r;
     });
 
+    CROW_ROUTE(app, "/api/project/<string>/processed/png").methods(crow::HTTPMethod::OPTIONS)([](const std::string &){
+        crow::response r;
+        r.set_header("Access-Control-Allow-Origin", "*");
+        r.set_header("Access-Control-Allow-Methods", "GET, OPTIONS");
+        r.set_header("Access-Control-Allow-Headers", "Content-Type");
+        r.code = 204;
+        return r;
+    });
+
+    CROW_ROUTE(app, "/api/project/<string>/processed/png/<string>").methods(crow::HTTPMethod::OPTIONS)([](const std::string &, const std::string &){
+        crow::response r;
+        r.set_header("Access-Control-Allow-Origin", "*");
+        r.set_header("Access-Control-Allow-Methods", "GET, OPTIONS");
+        r.set_header("Access-Control-Allow-Headers", "Content-Type");
+        r.code = 204;
+        return r;
+    });
+
     CROW_ROUTE(app, "/api/projects/<string>/semi").methods(crow::HTTPMethod::OPTIONS)([](const std::string &){
         crow::response r;
         r.set_header("Access-Control-Allow-Origin", "*");
@@ -791,6 +1346,15 @@ inline void register_info_routes(crow::SimpleApp &app, InfoStore &store) {
     });
 
     CROW_ROUTE(app, "/api/project/<string>/download/<string>").methods(crow::HTTPMethod::OPTIONS)([](const std::string &, const std::string &){
+        crow::response r;
+        r.set_header("Access-Control-Allow-Origin", "*");
+        r.set_header("Access-Control-Allow-Methods", "GET, OPTIONS");
+        r.set_header("Access-Control-Allow-Headers", "Content-Type");
+        r.code = 204;
+        return r;
+    });
+
+    CROW_ROUTE(app, "/api/project/<string>/download/processed/<string>").methods(crow::HTTPMethod::OPTIONS)([](const std::string &, const std::string &){
         crow::response r;
         r.set_header("Access-Control-Allow-Origin", "*");
         r.set_header("Access-Control-Allow-Methods", "GET, OPTIONS");
