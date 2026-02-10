@@ -2,11 +2,6 @@
 
 小型项目，Crow的函数直接写在头文件即可
 
-# 使用BuildWindows.sh来构建windows版本
-
-### 由于使用了Crow，在windows上编译可能会是灾难，建议其他平台交叉编译windows发行版
-不解答任何在windows平台编译此项目的问题（Just Use WSL2）  
-
 ### **请注意：Crow的输出会出现`[INFO    ]`，这是Crow的Feature，不是bug**(注：我美化了一下)
 
 
