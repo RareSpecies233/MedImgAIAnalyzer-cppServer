@@ -3,5 +3,6 @@
   "C_Cpp.default.cppStandard": "c++17",
   "files.exclude": {
     "**/.vscode/**": false
-  }
+  },
+  "cmake.ignoreCMakeListsMissing": true
 }
