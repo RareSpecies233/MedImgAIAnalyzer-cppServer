@@ -13,10 +13,16 @@
 #include <algorithm>
 #include <cmath>
 #include <cctype>
-#include <onnxruntime/onnxruntime_cxx_api.h>
+#include <onnxruntime_cxx_api.h>
 #include "cnpy.h"
 #include "info_store.h"
 #include "npz_to_glb.h"
+
+#ifdef _WIN32
+#ifdef DELETE
+#undef DELETE
+#endif
+#endif
 
 inline void set_json_headers(crow::response &r) {
     r.set_header("Content-Type", "application/json");
@@ -458,7 +464,12 @@ static inline std::vector<int64_t> run_onnx_inference_mask(const fs::path &onnx_
     Ort::SessionOptions opts;
     opts.SetIntraOpNumThreads(1);
     opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_EXTENDED);
+#ifdef _WIN32
+    auto onnx_path_w = onnx_path.wstring();
+    Ort::Session session(env, onnx_path_w.c_str(), opts);
+#else
     Ort::Session session(env, onnx_path.string().c_str(), opts);
+#endif
 
     Ort::AllocatorWithDefaultOptions allocator;
     Ort::AllocatedStringPtr input_name = session.GetInputNameAllocated(0, allocator);
