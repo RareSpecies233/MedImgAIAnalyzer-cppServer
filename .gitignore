@@ -18,3 +18,4 @@ main
 # Build directories
 build/
 bin/
+win_deps/
