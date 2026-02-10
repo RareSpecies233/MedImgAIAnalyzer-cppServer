@@ -994,6 +994,8 @@ inline void register_info_routes(crow::SimpleApp &app, InfoStore &store, const s
             fs::path processed_nii_dir = processed_dir / "nii";
             std::error_code ec;
             fs::remove_all(processed_dir, ec);
+            fs::remove_all(project_dir / "3d", ec);
+            fs::remove_all(project_dir / "OG3d", ec);
             fs::create_directories(processed_npz_dir);
             fs::create_directories(processed_png_dir);
             fs::create_directories(processed_dcm_dir);
