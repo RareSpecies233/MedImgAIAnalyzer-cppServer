@@ -1373,11 +1373,11 @@ inline void register_info_routes(crow::SimpleApp &app, InfoStore &store, const s
     CROW_ROUTE(app, "/api/project/<string>/download/3d").methods(crow::HTTPMethod::GET)([&store](const std::string &uuid){
         try {
             if (!store.exists(uuid)) throw std::runtime_error("project not found");
-            fs::path dir = store.base_path / uuid / "3d";
-            auto zip_path = create_zip_store(dir, uuid + "_3d.zip");
-            crow::response r{read_text_file(zip_path)};
-            r.set_header("Content-Type", "application/zip");
-            r.set_header("Content-Disposition", "attachment; filename=\"3d.zip\"");
+            fs::path glb_path = store.base_path / uuid / "3d" / "model.glb";
+            if (!fs::exists(glb_path)) throw std::runtime_error("3d model not found");
+            crow::response r{read_text_file(glb_path)};
+            r.set_header("Content-Type", "model/gltf-binary");
+            r.set_header("Content-Disposition", "attachment; filename=\"model.glb\"");
             return r;
         } catch (const std::exception &e) {
             crow::response r{std::string("{\"error\":\"") + e.what() + "\"}"};
@@ -1389,11 +1389,11 @@ inline void register_info_routes(crow::SimpleApp &app, InfoStore &store, const s
     CROW_ROUTE(app, "/api/project/<string>/download/OG3d").methods(crow::HTTPMethod::GET)([&store](const std::string &uuid){
         try {
             if (!store.exists(uuid)) throw std::runtime_error("project not found");
-            fs::path dir = store.base_path / uuid / "OG3d";
-            auto zip_path = create_zip_store(dir, uuid + "_OG3d.zip");
-            crow::response r{read_text_file(zip_path)};
-            r.set_header("Content-Type", "application/zip");
-            r.set_header("Content-Disposition", "attachment; filename=\"OG3d.zip\"");
+            fs::path glb_path = store.base_path / uuid / "OG3d" / "model.glb";
+            if (!fs::exists(glb_path)) throw std::runtime_error("OG3d model not found");
+            crow::response r{read_text_file(glb_path)};
+            r.set_header("Content-Type", "model/gltf-binary");
+            r.set_header("Content-Disposition", "attachment; filename=\"model.glb\"");
             return r;
         } catch (const std::exception &e) {
             crow::response r{std::string("{\"error\":\"") + e.what() + "\"}"};

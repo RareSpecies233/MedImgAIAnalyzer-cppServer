@@ -2,6 +2,8 @@
 
 小型项目，Crow的函数直接写在头文件即可
 
+# 使用BuildWindows.sh来构建windows版本
+
 ### 由于使用了Crow，在windows上编译可能会是灾难，建议其他平台交叉编译windows发行版
 不解答任何在windows平台编译此项目的问题（Just Use WSL2）  
 如果你也在macOS上使用微软大战代码搭配Xcode的clang，可以直接使用我的.vscode中的配置（应该）

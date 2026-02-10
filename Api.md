@@ -157,11 +157,11 @@
 
 18) 下载 3d 模型
 - 方法：GET /api/project/{uuid}/download/3d
-- 返回：ZIP（存储模式）
+- 返回：GLB（二进制，model.glb）
 
 19) 下载原始 3d 模型
 - 方法：GET /api/project/{uuid}/download/OG3d
-- 返回：ZIP（存储模式）
+- 返回：GLB（二进制，model.glb）
 
 ## 请求/响应头
 - 请求：POST/PATCH 请使用 `Content-Type: application/json`
