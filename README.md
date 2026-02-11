@@ -9,7 +9,9 @@
 
 - [Api说明及json说明](Api.md)
 
-编译macOS版本请使用[BuildmacOS.sh](BuildmacOS.sh)  
+编译macOS版本请使用[BuildmacOS.sh](BuildmacOS.sh)(请确保有1GB的空闲空间)  
+编译Windows版本请使用[build-windows.ps1](build-windows.ps1)(请确保有50GB的空闲空间)  
+
 编译Windows/Linux请原生编译，项目使用了onnx和opencv，交叉编译很麻烦
 
 如果你不信邪，可以使用[BuildWindows.sh](BuildWindows.sh)试试看（不建议使用）
