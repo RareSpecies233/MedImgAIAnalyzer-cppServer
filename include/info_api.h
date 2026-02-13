@@ -1455,16 +1455,48 @@ static inline std::string shell_escape(const std::string &s)
     return out;
 }
 
+static inline std::string powershell_single_quote_escape(const std::string &s)
+{
+    std::string out;
+    out.reserve(s.size());
+    for (char c : s) {
+        if (c == '\'') out += "''";
+        else out += c;
+    }
+    return out;
+}
+
 static inline fs::path create_zip_store(const fs::path &dir, const std::string &zip_name)
 {
     if (!fs::exists(dir)) throw std::runtime_error("目录不存在");
     fs::path tmp = fs::temp_directory_path() / zip_name;
+    if (fs::exists(tmp)) fs::remove(tmp);
+
+    int rc = 0;
+#ifdef _WIN32
+    std::string src_glob = powershell_single_quote_escape((dir / "*").string());
+    std::string dst_zip = powershell_single_quote_escape(tmp.string());
+    std::string cmd =
+        "powershell -NoProfile -NonInteractive -Command \"Compress-Archive -Path '" +
+        src_glob +
+        "' -DestinationPath '" +
+        dst_zip +
+        "' -CompressionLevel NoCompression -Force\"";
+    rc = std::system(cmd.c_str());
+#else
     std::string cmd = "zip -0 -r " + shell_escape(tmp.string()) + " .";
     auto cwd = fs::current_path();
     fs::current_path(dir);
-    int rc = std::system(cmd.c_str());
-    fs::current_path(cwd);
-    if (rc != 0) throw std::runtime_error("zip 失败");
+    try {
+        rc = std::system(cmd.c_str());
+        fs::current_path(cwd);
+    } catch (...) {
+        fs::current_path(cwd);
+        throw;
+    }
+#endif
+
+    if (rc != 0 || !fs::exists(tmp)) throw std::runtime_error("zip 失败");
     return tmp;
 }
 
