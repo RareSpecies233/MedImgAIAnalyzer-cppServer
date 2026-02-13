@@ -13,7 +13,11 @@
 #include <algorithm>
 #include <cmath>
 #include <cctype>
-#include <onnxruntime_cxx_api.h>
+#include <array>
+#include <cstdint>
+#include <cstring>
+#include <random>
+#include <onnxruntime/onnxruntime_cxx_api.h>
 #include "cnpy.h"
 #include "info_store.h"
 #include "npz_to_glb.h"
@@ -238,33 +242,709 @@ static inline const cnpy::NpyArray *find_npz_array(const cnpy::npz_t &npz,
     return nullptr;
 }
 
-static inline void write_placeholder_png(const fs::path &out_path)
+inline constexpr const char* kNpzEmbedMagic = "NPZ_ROUNDTRIP_V1\0";
+inline constexpr size_t kNpzEmbedMagicSize = 17;
+
+static inline std::string base64_encode(const std::vector<uint8_t> &input)
 {
-    cv::Mat img(512, 512, CV_8UC3, cv::Scalar(255, 255, 255));
-    const int step = 48;
-    for (int y = 32; y < img.rows; y += step) {
-        for (int x = 16; x < img.cols; x += step) {
-            cv::putText(img, "?", cv::Point(x, y), cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(0, 0, 0), 2);
+    static constexpr char kTable[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    out.reserve(((input.size() + 2) / 3) * 4);
+
+    size_t i = 0;
+    while (i + 3 <= input.size()) {
+        const uint32_t v = (static_cast<uint32_t>(input[i]) << 16) |
+                           (static_cast<uint32_t>(input[i + 1]) << 8) |
+                           static_cast<uint32_t>(input[i + 2]);
+        out.push_back(kTable[(v >> 18) & 0x3F]);
+        out.push_back(kTable[(v >> 12) & 0x3F]);
+        out.push_back(kTable[(v >> 6) & 0x3F]);
+        out.push_back(kTable[v & 0x3F]);
+        i += 3;
+    }
+
+    if (i < input.size()) {
+        uint32_t v = static_cast<uint32_t>(input[i]) << 16;
+        out.push_back(kTable[(v >> 18) & 0x3F]);
+        if (i + 1 < input.size()) {
+            v |= static_cast<uint32_t>(input[i + 1]) << 8;
+            out.push_back(kTable[(v >> 12) & 0x3F]);
+            out.push_back(kTable[(v >> 6) & 0x3F]);
+            out.push_back('=');
+        } else {
+            out.push_back(kTable[(v >> 12) & 0x3F]);
+            out.push_back('=');
+            out.push_back('=');
         }
     }
-    cv::imwrite(out_path.string(), img);
+    return out;
 }
 
-static inline void all2npz_stub(const fs::path &src, const fs::path &dst)
+static inline std::vector<uint8_t> base64_decode(const std::string &input)
 {
-    std::cout << "all2npz尚未开发，目前仅修改后缀" << std::endl;
-    std::error_code ec;
-    fs::create_directories(dst.parent_path(), ec);
-    fs::copy_file(src, dst, fs::copy_options::overwrite_existing, ec);
-    if (ec) throw std::runtime_error("all2npz 复制失败: " + ec.message());
+    static std::array<int, 256> decode_table = [] {
+        std::array<int, 256> table{};
+        table.fill(-1);
+        const std::string chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        for (size_t i = 0; i < chars.size(); ++i) {
+            table[static_cast<uint8_t>(chars[i])] = static_cast<int>(i);
+        }
+        return table;
+    }();
+
+    std::vector<uint8_t> out;
+    uint32_t accum = 0;
+    int bits = 0;
+
+    for (char c : input) {
+        if (std::isspace(static_cast<unsigned char>(c)) != 0) {
+            continue;
+        }
+        if (c == '=') {
+            break;
+        }
+        const int value = decode_table[static_cast<uint8_t>(c)];
+        if (value < 0) {
+            throw std::runtime_error("base64 解码失败: 非法字符");
+        }
+        accum = (accum << 6) | static_cast<uint32_t>(value);
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            out.push_back(static_cast<uint8_t>((accum >> bits) & 0xFF));
+        }
+    }
+
+    return out;
 }
 
-static inline void all2png_stub(const fs::path &src, const fs::path &dst)
+static inline std::vector<uint8_t> pack_embedded_npz(const std::vector<uint8_t> &npz_bytes)
 {
-    std::cout << "尚未开发nii、dcm转png" << std::endl;
+    const std::string b64 = base64_encode(npz_bytes);
+    std::vector<uint8_t> out;
+    out.reserve(kNpzEmbedMagicSize + 8 + b64.size());
+    out.insert(out.end(), kNpzEmbedMagic, kNpzEmbedMagic + kNpzEmbedMagicSize);
+
+    uint64_t len = static_cast<uint64_t>(b64.size());
+    for (int i = 0; i < 8; ++i) {
+        out.push_back(static_cast<uint8_t>((len >> (8 * i)) & 0xFF));
+    }
+    out.insert(out.end(), b64.begin(), b64.end());
+    return out;
+}
+
+static inline bool unpack_embedded_npz(const std::vector<uint8_t> &payload, std::vector<uint8_t> *npz_bytes)
+{
+    if (payload.size() < kNpzEmbedMagicSize + 8) {
+        return false;
+    }
+    if (std::memcmp(payload.data(), kNpzEmbedMagic, kNpzEmbedMagicSize) != 0) {
+        return false;
+    }
+    uint64_t len = 0;
+    for (int i = 0; i < 8; ++i) {
+        len |= (static_cast<uint64_t>(payload[kNpzEmbedMagicSize + i]) << (8 * i));
+    }
+    const size_t start = kNpzEmbedMagicSize + 8;
+    if (payload.size() < start + static_cast<size_t>(len)) {
+        return false;
+    }
+    const std::string b64(reinterpret_cast<const char *>(payload.data() + start), static_cast<size_t>(len));
+    *npz_bytes = base64_decode(b64);
+    return true;
+}
+
+static inline bool try_extract_embedded_npz_from_bytes(const std::vector<uint8_t> &all_bytes,
+                                                       std::vector<uint8_t> *npz_bytes)
+{
+    for (size_t i = 0; i + kNpzEmbedMagicSize + 8 <= all_bytes.size(); ++i) {
+        if (std::memcmp(all_bytes.data() + i, kNpzEmbedMagic, kNpzEmbedMagicSize) == 0) {
+            std::vector<uint8_t> slice(all_bytes.begin() + static_cast<long>(i), all_bytes.end());
+            if (unpack_embedded_npz(slice, npz_bytes)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+static inline uint16_t read_u16_le(const std::vector<uint8_t> &b, size_t off)
+{
+    return static_cast<uint16_t>(b[off]) | (static_cast<uint16_t>(b[off + 1]) << 8);
+}
+
+static inline uint32_t read_u32_le(const std::vector<uint8_t> &b, size_t off)
+{
+    return static_cast<uint32_t>(b[off]) | (static_cast<uint32_t>(b[off + 1]) << 8) |
+           (static_cast<uint32_t>(b[off + 2]) << 16) | (static_cast<uint32_t>(b[off + 3]) << 24);
+}
+
+static inline std::vector<uint8_t> read_tag_value_explicit_vr(const std::vector<uint8_t> &dcm,
+                                                               uint16_t target_group,
+                                                               uint16_t target_elem,
+                                                               bool *found = nullptr)
+{
+    if (found != nullptr) *found = false;
+    size_t off = 132;
+    while (off + 8 <= dcm.size()) {
+        const uint16_t group = read_u16_le(dcm, off);
+        const uint16_t elem = read_u16_le(dcm, off + 2);
+        const char vr0 = static_cast<char>(dcm[off + 4]);
+        const char vr1 = static_cast<char>(dcm[off + 5]);
+        const std::string vr{vr0, vr1};
+
+        bool long_vr = (vr == "OB" || vr == "OW" || vr == "OF" || vr == "SQ" || vr == "UT" || vr == "UN");
+        uint32_t len = 0;
+        size_t value_off = 0;
+        if (long_vr) {
+            if (off + 12 > dcm.size()) break;
+            len = read_u32_le(dcm, off + 8);
+            value_off = off + 12;
+            off += 12;
+        } else {
+            len = read_u16_le(dcm, off + 6);
+            value_off = off + 8;
+            off += 8;
+        }
+        if (value_off + len > dcm.size()) break;
+
+        if (group == target_group && elem == target_elem) {
+            if (found != nullptr) *found = true;
+            return std::vector<uint8_t>(dcm.begin() + static_cast<long>(value_off),
+                                        dcm.begin() + static_cast<long>(value_off + len));
+        }
+        off = value_off + len;
+    }
+    return {};
+}
+
+static inline std::vector<size_t> require_shape_2d(const cnpy::NpyArray &arr)
+{
+    if (arr.shape.size() != 2) {
+        throw std::runtime_error("仅支持二维数组，当前维度=" + std::to_string(arr.shape.size()));
+    }
+    return arr.shape;
+}
+
+static inline std::vector<double> npy_to_double_2d_strict(const cnpy::NpyArray &arr)
+{
+    int h = 0;
+    int w = 0;
+    return npy_to_double_2d(arr, h, w);
+}
+
+static inline std::vector<uint16_t> to_uint16_clipped(const std::vector<double> &input)
+{
+    std::vector<uint16_t> out(input.size(), 0);
+    for (size_t i = 0; i < input.size(); ++i) {
+        double v = input[i];
+        if (!std::isfinite(v)) {
+            v = 0.0;
+        }
+        v = std::clamp(v, 0.0, 65535.0);
+        out[i] = static_cast<uint16_t>(std::llround(v));
+    }
+    return out;
+}
+
+static inline std::vector<float> to_float32(const std::vector<double> &input)
+{
+    std::vector<float> out(input.size(), 0.0F);
+    for (size_t i = 0; i < input.size(); ++i) {
+        out[i] = static_cast<float>(input[i]);
+    }
+    return out;
+}
+
+static inline std::vector<double> image_from_gray_u8(const cv::Mat &gray)
+{
+    if (gray.type() != CV_8UC1) {
+        throw std::runtime_error("png 需要为单通道 8 位图像");
+    }
+    const int rows = gray.rows;
+    const int cols = gray.cols;
+    std::vector<double> out(static_cast<size_t>(rows) * static_cast<size_t>(cols), 0.0);
+    for (int r = 0; r < rows; ++r) {
+        for (int c = 0; c < cols; ++c) {
+            out[static_cast<size_t>(r) * static_cast<size_t>(cols) + static_cast<size_t>(c)] =
+                static_cast<double>(gray.at<uint8_t>(r, c)) / 255.0;
+        }
+    }
+    return out;
+}
+
+static inline void save_onnx_compatible_npz(const fs::path &out_path,
+                                            const std::vector<size_t> &image_shape,
+                                            const std::vector<double> &image_data)
+{
+    if (image_shape.size() != 2) {
+        throw std::runtime_error("save_onnx_compatible_npz 仅支持 2D image");
+    }
+    const size_t n = image_shape[0] * image_shape[1];
+    if (image_data.size() != n) {
+        throw std::runtime_error("image 数据长度与 shape 不匹配");
+    }
+
+    std::vector<uint8_t> label(n, 0);
+    cnpy::npz_save(out_path.string(), "image", image_data.data(), image_shape, "w");
+    cnpy::npz_save(out_path.string(), "label", label.data(), image_shape, "a");
+}
+
+static inline std::string uid_like()
+{
+    static std::mt19937_64 rng{std::random_device{}()};
+    std::uniform_int_distribution<uint64_t> dist(1000000ULL, 999999999ULL);
+    return "2.25." + std::to_string(dist(rng));
+}
+
+static inline void append_u16_le(std::vector<uint8_t> &out, uint16_t v)
+{
+    out.push_back(static_cast<uint8_t>(v & 0xFF));
+    out.push_back(static_cast<uint8_t>((v >> 8) & 0xFF));
+}
+
+static inline void append_u32_le(std::vector<uint8_t> &out, uint32_t v)
+{
+    out.push_back(static_cast<uint8_t>(v & 0xFF));
+    out.push_back(static_cast<uint8_t>((v >> 8) & 0xFF));
+    out.push_back(static_cast<uint8_t>((v >> 16) & 0xFF));
+    out.push_back(static_cast<uint8_t>((v >> 24) & 0xFF));
+}
+
+static inline std::vector<uint8_t> str_bytes(const std::string &s)
+{
+    return std::vector<uint8_t>(s.begin(), s.end());
+}
+
+static inline std::vector<uint8_t> u16_bytes(uint16_t v)
+{
+    std::vector<uint8_t> out;
+    append_u16_le(out, v);
+    return out;
+}
+
+static inline void append_tag(std::vector<uint8_t> &out,
+                              uint16_t group,
+                              uint16_t element,
+                              const std::string &vr,
+                              const std::vector<uint8_t> &value)
+{
+    append_u16_le(out, group);
+    append_u16_le(out, element);
+    out.push_back(static_cast<uint8_t>(vr[0]));
+    out.push_back(static_cast<uint8_t>(vr[1]));
+
+    const bool long_vr = (vr == "OB" || vr == "OW" || vr == "OF" || vr == "SQ" || vr == "UT" || vr == "UN");
+    std::vector<uint8_t> val = value;
+    if (val.size() % 2 != 0) {
+        const uint8_t pad = (vr == "UI" || vr == "LO" || vr == "PN" || vr == "CS" || vr == "DA" || vr == "TM")
+                                ? static_cast<uint8_t>(' ')
+                                : static_cast<uint8_t>(0);
+        val.push_back(pad);
+    }
+
+    if (long_vr) {
+        out.push_back(0);
+        out.push_back(0);
+        append_u32_le(out, static_cast<uint32_t>(val.size()));
+    } else {
+        append_u16_le(out, static_cast<uint16_t>(val.size()));
+    }
+    out.insert(out.end(), val.begin(), val.end());
+}
+
+#pragma pack(push, 1)
+struct Nifti1Header {
+    int32_t sizeof_hdr;
+    char data_type[10];
+    char db_name[18];
+    int32_t extents;
+    int16_t session_error;
+    char regular;
+    char dim_info;
+    int16_t dim[8];
+    float intent_p1;
+    float intent_p2;
+    float intent_p3;
+    int16_t intent_code;
+    int16_t datatype;
+    int16_t bitpix;
+    int16_t slice_start;
+    float pixdim[8];
+    float vox_offset;
+    float scl_slope;
+    float scl_inter;
+    int16_t slice_end;
+    char slice_code;
+    char xyzt_units;
+    float cal_max;
+    float cal_min;
+    float slice_duration;
+    float toffset;
+    int32_t glmax;
+    int32_t glmin;
+    char descrip[80];
+    char aux_file[24];
+    int16_t qform_code;
+    int16_t sform_code;
+    float quatern_b;
+    float quatern_c;
+    float quatern_d;
+    float qoffset_x;
+    float qoffset_y;
+    float qoffset_z;
+    float srow_x[4];
+    float srow_y[4];
+    float srow_z[4];
+    char intent_name[16];
+    char magic[4];
+};
+#pragma pack(pop)
+
+static_assert(sizeof(Nifti1Header) == 348, "Nifti1Header 大小必须为 348 字节");
+
+static inline void dcm_to_npz(const fs::path &input_path, const fs::path &out_path)
+{
+    const std::vector<uint8_t> dcm_bytes = [&] {
+        std::string raw = read_text_file(input_path);
+        return std::vector<uint8_t>(raw.begin(), raw.end());
+    }();
+
+    std::vector<uint8_t> embedded_npz;
+    if (try_extract_embedded_npz_from_bytes(dcm_bytes, &embedded_npz)) {
+        write_text_file(out_path, std::string(embedded_npz.begin(), embedded_npz.end()));
+        return;
+    }
+
+    bool ok_rows = false;
+    bool ok_cols = false;
+    bool ok_pixel = false;
+    const auto rows_buf = read_tag_value_explicit_vr(dcm_bytes, 0x0028, 0x0010, &ok_rows);
+    const auto cols_buf = read_tag_value_explicit_vr(dcm_bytes, 0x0028, 0x0011, &ok_cols);
+    const auto pixel_buf = read_tag_value_explicit_vr(dcm_bytes, 0x7FE0, 0x0010, &ok_pixel);
+
+    if (!ok_rows || !ok_cols || !ok_pixel || rows_buf.size() < 2 || cols_buf.size() < 2) {
+        throw std::runtime_error("无法从 DICOM 读取像素，也未找到嵌入的 NPZ 载荷");
+    }
+
+    const uint16_t rows = static_cast<uint16_t>(rows_buf[0]) | (static_cast<uint16_t>(rows_buf[1]) << 8);
+    const uint16_t cols = static_cast<uint16_t>(cols_buf[0]) | (static_cast<uint16_t>(cols_buf[1]) << 8);
+    const size_t n = static_cast<size_t>(rows) * static_cast<size_t>(cols);
+    if (pixel_buf.size() < n * sizeof(uint16_t)) {
+        throw std::runtime_error("DICOM PixelData 长度不足");
+    }
+
+    std::vector<uint16_t> image(n, 0);
+    std::memcpy(image.data(), pixel_buf.data(), n * sizeof(uint16_t));
+    std::vector<uint8_t> label(n, 0);
+    const std::vector<size_t> shape{rows, cols};
+    cnpy::npz_save(out_path.string(), "image", image.data(), shape, "w");
+    cnpy::npz_save(out_path.string(), "label", label.data(), shape, "a");
+}
+
+static inline void npz_to_dcm(const fs::path &input_path, const fs::path &out_path, const std::string &key)
+{
+    const auto npz_map = cnpy::npz_load(input_path.string());
+    auto it = npz_map.find(key);
+    if (it == npz_map.end()) {
+        throw std::runtime_error("npz 中找不到键: " + key);
+    }
+    const auto shape = require_shape_2d(it->second);
+    const auto image_f64 = npy_to_double_2d_strict(it->second);
+    const auto image_u16 = to_uint16_clipped(image_f64);
+
+    const uint16_t rows = static_cast<uint16_t>(shape[0]);
+    const uint16_t cols = static_cast<uint16_t>(shape[1]);
+
+    const std::string npz_raw = read_text_file(input_path);
+    const std::vector<uint8_t> npz_bytes(npz_raw.begin(), npz_raw.end());
+    const auto packed_npz = pack_embedded_npz(npz_bytes);
+
+    std::vector<uint8_t> out(128, 0);
+    out.push_back('D');
+    out.push_back('I');
+    out.push_back('C');
+    out.push_back('M');
+
+    std::vector<uint8_t> file_meta;
+    const std::string sop_class = "1.2.840.10008.5.1.4.1.1.7";
+    const std::string sop_instance = uid_like();
+    const std::string transfer_syntax = "1.2.840.10008.1.2.1";
+    const std::string impl_uid = uid_like();
+
+    append_tag(file_meta, 0x0002, 0x0001, "OB", {0x00, 0x01});
+    append_tag(file_meta, 0x0002, 0x0002, "UI", str_bytes(sop_class));
+    append_tag(file_meta, 0x0002, 0x0003, "UI", str_bytes(sop_instance));
+    append_tag(file_meta, 0x0002, 0x0010, "UI", str_bytes(transfer_syntax));
+    append_tag(file_meta, 0x0002, 0x0012, "UI", str_bytes(impl_uid));
+
+    append_tag(out,
+               0x0002,
+               0x0000,
+               "UL",
+               std::vector<uint8_t>{
+                   static_cast<uint8_t>(file_meta.size() & 0xFF),
+                   static_cast<uint8_t>((file_meta.size() >> 8) & 0xFF),
+                   static_cast<uint8_t>((file_meta.size() >> 16) & 0xFF),
+                   static_cast<uint8_t>((file_meta.size() >> 24) & 0xFF),
+               });
+    out.insert(out.end(), file_meta.begin(), file_meta.end());
+
+    append_tag(out, 0x0008, 0x0060, "CS", str_bytes("OT"));
+    append_tag(out, 0x0010, 0x0010, "PN", str_bytes("Converted^FromNPZ"));
+    append_tag(out, 0x0010, 0x0020, "LO", str_bytes("NPZ0001"));
+    append_tag(out, 0x0028, 0x0010, "US", u16_bytes(rows));
+    append_tag(out, 0x0028, 0x0011, "US", u16_bytes(cols));
+    append_tag(out, 0x0028, 0x0002, "US", u16_bytes(1));
+    append_tag(out, 0x0028, 0x0004, "CS", str_bytes("MONOCHROME2"));
+    append_tag(out, 0x0028, 0x0100, "US", u16_bytes(16));
+    append_tag(out, 0x0028, 0x0101, "US", u16_bytes(16));
+    append_tag(out, 0x0028, 0x0102, "US", u16_bytes(15));
+    append_tag(out, 0x0028, 0x0103, "US", u16_bytes(0));
+    append_tag(out, 0x0011, 0x0010, "LO", str_bytes("NPZ_ROUNDTRIP"));
+    append_tag(out, 0x0011, 0x1010, "OB", packed_npz);
+
+    std::vector<uint8_t> pixel_bytes(image_u16.size() * sizeof(uint16_t));
+    std::memcpy(pixel_bytes.data(), image_u16.data(), pixel_bytes.size());
+    append_tag(out, 0x7FE0, 0x0010, "OW", pixel_bytes);
+
+    write_text_file(out_path, std::string(out.begin(), out.end()));
+}
+
+static inline void npz_to_nii(const fs::path &input_path, const fs::path &out_path, const std::string &key)
+{
+    const auto npz_map = cnpy::npz_load(input_path.string());
+    auto it = npz_map.find(key);
+    if (it == npz_map.end()) {
+        throw std::runtime_error("npz 中找不到键: " + key);
+    }
+
+    std::vector<size_t> shape = it->second.shape;
+    std::vector<float> image_f32;
+    if (shape.size() == 2) {
+        const auto image_f64 = npy_to_double_2d_strict(it->second);
+        image_f32 = to_float32(image_f64);
+        shape = {shape[0], shape[1], 1};
+    } else if (shape.size() == 3) {
+        const size_t n = shape[0] * shape[1] * shape[2];
+        image_f32.resize(n, 0.0F);
+        if (it->second.word_size == sizeof(float)) {
+            const auto *p = it->second.data<float>();
+            std::copy(p, p + n, image_f32.begin());
+        } else if (it->second.word_size == sizeof(double)) {
+            const auto *p = it->second.data<double>();
+            for (size_t i = 0; i < n; ++i) image_f32[i] = static_cast<float>(p[i]);
+        } else {
+            throw std::runtime_error("3D NIfTI 仅支持 float32/float64 输入");
+        }
+    } else {
+        throw std::runtime_error("仅支持 2D/3D 写入 NIfTI");
+    }
+
+    const std::string npz_raw = read_text_file(input_path);
+    const std::vector<uint8_t> npz_bytes(npz_raw.begin(), npz_raw.end());
+    const auto packed_npz = pack_embedded_npz(npz_bytes);
+
+    Nifti1Header hdr{};
+    hdr.sizeof_hdr = 348;
+    hdr.dim[0] = 3;
+    hdr.dim[1] = static_cast<int16_t>(shape[0]);
+    hdr.dim[2] = static_cast<int16_t>(shape[1]);
+    hdr.dim[3] = static_cast<int16_t>(shape[2]);
+    hdr.datatype = 16;
+    hdr.bitpix = 32;
+    hdr.pixdim[1] = 1.0F;
+    hdr.pixdim[2] = 1.0F;
+    hdr.pixdim[3] = 1.0F;
+
+    int32_t ext_size = static_cast<int32_t>(8 + packed_npz.size());
+    const int32_t rem = ext_size % 16;
+    if (rem != 0) ext_size += (16 - rem);
+    hdr.vox_offset = static_cast<float>(352 + ext_size);
+    std::strncpy(hdr.descrip, "ConvertedFromNPZ", sizeof(hdr.descrip) - 1);
+    hdr.sform_code = 1;
+    hdr.srow_x[0] = 1.0F;
+    hdr.srow_y[1] = 1.0F;
+    hdr.srow_z[2] = 1.0F;
+    hdr.magic[0] = 'n';
+    hdr.magic[1] = '+';
+    hdr.magic[2] = '1';
+    hdr.magic[3] = '\0';
+
+    std::vector<uint8_t> out;
+    out.resize(348);
+    std::memcpy(out.data(), &hdr, 348);
+
+    out.push_back(1);
+    out.push_back(0);
+    out.push_back(0);
+    out.push_back(0);
+
+    append_u32_le(out, static_cast<uint32_t>(ext_size));
+    append_u32_le(out, 40);
+    out.insert(out.end(), packed_npz.begin(), packed_npz.end());
+    while ((out.size() - 352) % 16 != 0) {
+        out.push_back(0);
+    }
+
+    const auto data_offset = static_cast<size_t>(hdr.vox_offset);
+    if (out.size() < data_offset) {
+        out.resize(data_offset, 0);
+    }
+    const size_t data_bytes = image_f32.size() * sizeof(float);
+    const size_t base = out.size();
+    out.resize(base + data_bytes);
+    std::memcpy(out.data() + static_cast<long>(base), image_f32.data(), data_bytes);
+
+    write_text_file(out_path, std::string(out.begin(), out.end()));
+}
+
+static inline void nii_to_npz(const fs::path &input_path, const fs::path &out_path, int slice_index = -1)
+{
+    const std::string raw = read_text_file(input_path);
+    const std::vector<uint8_t> all(raw.begin(), raw.end());
+    if (all.size() < 352) {
+        throw std::runtime_error("NIfTI 文件过小");
+    }
+
+    std::vector<uint8_t> embedded_npz;
+    if (try_extract_embedded_npz_from_bytes(all, &embedded_npz)) {
+        write_text_file(out_path, std::string(embedded_npz.begin(), embedded_npz.end()));
+        return;
+    }
+
+    Nifti1Header hdr{};
+    std::memcpy(&hdr, all.data(), 348);
+    if (hdr.sizeof_hdr != 348) {
+        throw std::runtime_error("不支持的 NIfTI 头部");
+    }
+
+    const int ndim = hdr.dim[0];
+    const int d1 = std::max<int>(1, hdr.dim[1]);
+    const int d2 = std::max<int>(1, hdr.dim[2]);
+    const int d3 = std::max<int>(1, hdr.dim[3]);
+
+    if (ndim < 2) {
+        throw std::runtime_error("NIfTI 维度不足");
+    }
+
+    const size_t vox_offset = static_cast<size_t>(hdr.vox_offset);
+    if (vox_offset >= all.size()) {
+        throw std::runtime_error("NIfTI vox_offset 越界");
+    }
+
+    const size_t n = static_cast<size_t>(d1) * static_cast<size_t>(d2) * static_cast<size_t>(d3);
+    std::vector<double> volume(n, 0.0);
+
+    if (hdr.datatype == 16 && hdr.bitpix == 32) {
+        const size_t need = n * sizeof(float);
+        if (vox_offset + need > all.size()) throw std::runtime_error("NIfTI 数据长度不足");
+        const auto *p = reinterpret_cast<const float *>(all.data() + static_cast<long>(vox_offset));
+        for (size_t i = 0; i < n; ++i) volume[i] = static_cast<double>(p[i]);
+    } else if (hdr.datatype == 64 && hdr.bitpix == 64) {
+        const size_t need = n * sizeof(double);
+        if (vox_offset + need > all.size()) throw std::runtime_error("NIfTI 数据长度不足");
+        const auto *p = reinterpret_cast<const double *>(all.data() + static_cast<long>(vox_offset));
+        std::copy(p, p + n, volume.begin());
+    } else if (hdr.datatype == 512 && hdr.bitpix == 16) {
+        const size_t need = n * sizeof(uint16_t);
+        if (vox_offset + need > all.size()) throw std::runtime_error("NIfTI 数据长度不足");
+        const auto *p = reinterpret_cast<const uint16_t *>(all.data() + static_cast<long>(vox_offset));
+        for (size_t i = 0; i < n; ++i) volume[i] = static_cast<double>(p[i]);
+    } else {
+        throw std::runtime_error("当前仅支持读取 float32/float64/uint16 的 NIfTI");
+    }
+
+    const int use_slice = (d3 == 1) ? 0 : (slice_index >= 0 ? slice_index : (d3 / 2));
+    if (use_slice < 0 || use_slice >= d3) {
+        throw std::runtime_error("slice_index 越界");
+    }
+
+    const size_t hw = static_cast<size_t>(d1) * static_cast<size_t>(d2);
+    std::vector<double> image(hw, 0.0);
+    const size_t z_off = static_cast<size_t>(use_slice) * hw;
+    std::copy(volume.begin() + static_cast<long>(z_off),
+              volume.begin() + static_cast<long>(z_off + hw),
+              image.begin());
+
+    save_onnx_compatible_npz(out_path, {static_cast<size_t>(d1), static_cast<size_t>(d2)}, image);
+}
+
+static inline void png_to_npz(const fs::path &input_path, const fs::path &out_path)
+{
+    const cv::Mat gray = cv::imread(input_path.string(), cv::IMREAD_GRAYSCALE);
+    if (gray.empty()) {
+        throw std::runtime_error("读取 png 失败: " + input_path.string());
+    }
+    const auto image = image_from_gray_u8(gray);
+    save_onnx_compatible_npz(out_path,
+                             {static_cast<size_t>(gray.rows), static_cast<size_t>(gray.cols)},
+                             image);
+}
+
+static inline void npz_to_png(const fs::path &input_path, const fs::path &out_path, const std::string &key = "image")
+{
+    const auto npz_map = cnpy::npz_load(input_path.string());
+    auto it = npz_map.find(key);
+    if (it == npz_map.end()) {
+        throw std::runtime_error("npz 中找不到键: " + key);
+    }
+    int h = 0;
+    int w = 0;
+    std::vector<double> image_data = npy_to_double_2d(it->second, h, w);
+    cv::Mat image = normalize_to_u8(image_data, h, w);
+    if (!cv::imwrite(out_path.string(), image)) {
+        throw std::runtime_error("写入 png 失败: " + out_path.string());
+    }
+}
+
+static inline void all2npz(const fs::path &src, const fs::path &dst)
+{
     std::error_code ec;
     fs::create_directories(dst.parent_path(), ec);
-    write_placeholder_png(dst);
+    const std::string ext = to_lower_copy(src.extension().string());
+    if (ext == ".npz") {
+        fs::copy_file(src, dst, fs::copy_options::overwrite_existing, ec);
+        if (ec) throw std::runtime_error("npz 复制失败: " + ec.message());
+        return;
+    }
+    if (ext == ".dcm") {
+        dcm_to_npz(src, dst);
+        return;
+    }
+    if (ext == ".nii" || ext == ".gz" || ext == ".nii.gz") {
+        nii_to_npz(src, dst, -1);
+        return;
+    }
+    if (ext == ".png") {
+        png_to_npz(src, dst);
+        return;
+    }
+    throw std::runtime_error("不支持转换为npz的文件类型: " + src.extension().string());
+}
+
+static inline void all2png(const fs::path &src, const fs::path &dst)
+{
+    std::error_code ec;
+    fs::create_directories(dst.parent_path(), ec);
+    const std::string ext = to_lower_copy(src.extension().string());
+    if (ext == ".png") {
+        fs::copy_file(src, dst, fs::copy_options::overwrite_existing, ec);
+        if (ec) throw std::runtime_error("png 复制失败: " + ec.message());
+        return;
+    }
+    if (ext == ".npz") {
+        npz_to_png(src, dst, "image");
+        return;
+    }
+    if (ext == ".dcm" || ext == ".nii" || ext == ".gz" || ext == ".nii.gz") {
+        fs::path tmp_npz = dst.parent_path() / (src.stem().string() + ".__tmp_convert__.npz");
+        all2npz(src, tmp_npz);
+        npz_to_png(tmp_npz, dst, "image");
+        fs::remove(tmp_npz, ec);
+        return;
+    }
+    throw std::runtime_error("不支持转换为png的文件类型: " + src.extension().string());
 }
 
 static inline void convert_npz_to_pngs(const fs::path &npz_path,
@@ -788,6 +1468,41 @@ static inline fs::path create_zip_store(const fs::path &dir, const std::string &
     return tmp;
 }
 
+static inline void ensure_converted_from_npz_dir(const fs::path &npz_dir,
+                                                 const fs::path &out_dir,
+                                                 const std::string &target,
+                                                 const std::string &npz_key)
+{
+    auto existing = list_files(out_dir);
+    if (!existing.empty()) return;
+
+    if (!fs::exists(npz_dir)) {
+        throw std::runtime_error("源npz目录不存在，无法转换");
+    }
+
+    fs::create_directories(out_dir);
+    auto npz_files = list_files(npz_dir);
+    size_t converted = 0;
+    for (const auto &src : npz_files) {
+        if (to_lower_copy(src.extension().string()) != ".npz") continue;
+        if (target == "dcm") {
+            fs::path dst = out_dir / (src.stem().string() + ".dcm");
+            npz_to_dcm(src, dst, npz_key);
+            ++converted;
+        } else if (target == "nii") {
+            fs::path dst = out_dir / (src.stem().string() + ".nii");
+            npz_to_nii(src, dst, npz_key);
+            ++converted;
+        } else {
+            throw std::runtime_error("未知转换目标: " + target);
+        }
+    }
+
+    if (converted == 0) {
+        throw std::runtime_error("源npz目录为空，无法转换");
+    }
+}
+
 inline void register_info_routes(crow::SimpleApp &app, InfoStore &store, const std::string &onnx_path) {
     // 列表
     CROW_ROUTE(app, "/api/projects/info.json").methods(crow::HTTPMethod::GET)([&store]() {
@@ -921,7 +1636,7 @@ inline void register_info_routes(crow::SimpleApp &app, InfoStore &store, const s
                 fs::create_directories(npz_dir);
                 for (const auto &src : temp_files) {
                     fs::path dst = npz_dir / (src.stem().string() + ".npz");
-                    all2npz_stub(src, dst);
+                    all2npz(src, dst);
                 }
             }
 
@@ -937,7 +1652,7 @@ inline void register_info_routes(crow::SimpleApp &app, InfoStore &store, const s
                 } else if (raw == "dcm" || raw == "nii") {
                     for (const auto &src : temp_files) {
                         fs::path dst = png_dir / (src.stem().string() + ".png");
-                        all2png_stub(src, dst);
+                        all2png(src, dst);
                     }
                 } else if (raw == "png") {
                     // no-op
@@ -1045,13 +1760,18 @@ inline void register_info_routes(crow::SimpleApp &app, InfoStore &store, const s
                                         crop_yR);
 
                 convert_npz_to_pngs(out_npz, processed_png_dir, processed_png_dir, true, false, "");
+
+                fs::path out_dcm = processed_dcm_dir / (src.stem().string() + "-PD.dcm");
+                fs::path out_nii = processed_nii_dir / (src.stem().string() + "-PD.nii");
+                npz_to_dcm(out_npz, out_dcm, "label");
+                npz_to_nii(out_npz, out_nii, "label");
             }
 
             update_project_json_fields(project_json, {
                 {"processed", "\"" + mode_val + "\""},
                 {"PD", "\"" + mode_val + "\""},
-                {"PD-nii", "false"},
-                {"PD-dcm", "false"},
+                {"PD-nii", "true"},
+                {"PD-dcm", "true"},
                 {"PD-3d", "false"}
             });
 
@@ -1245,7 +1965,12 @@ inline void register_info_routes(crow::SimpleApp &app, InfoStore &store, const s
     CROW_ROUTE(app, "/api/project/<string>/download/dcm").methods(crow::HTTPMethod::GET)([&store](const std::string &uuid){
         try {
             if (!store.exists(uuid)) throw std::runtime_error("project not found");
-            fs::path dir = store.base_path / uuid / "dcm";
+            fs::path project_dir = store.base_path / uuid;
+            fs::path dir = project_dir / "dcm";
+            if (list_files(dir).empty()) {
+                ensure_converted_from_npz_dir(project_dir / "npz", dir, "dcm", "image");
+                update_project_json_fields(project_dir / "project.json", {{"dcm", "true"}});
+            }
             auto zip_path = create_zip_store(dir, uuid + "_dcm.zip");
             crow::response r{read_text_file(zip_path)};
             r.set_header("Content-Type", "application/zip");
@@ -1261,7 +1986,12 @@ inline void register_info_routes(crow::SimpleApp &app, InfoStore &store, const s
     CROW_ROUTE(app, "/api/project/<string>/download/nii").methods(crow::HTTPMethod::GET)([&store](const std::string &uuid){
         try {
             if (!store.exists(uuid)) throw std::runtime_error("project not found");
-            fs::path dir = store.base_path / uuid / "nii";
+            fs::path project_dir = store.base_path / uuid;
+            fs::path dir = project_dir / "nii";
+            if (list_files(dir).empty()) {
+                ensure_converted_from_npz_dir(project_dir / "npz", dir, "nii", "image");
+                update_project_json_fields(project_dir / "project.json", {{"nii", "true"}});
+            }
             auto zip_path = create_zip_store(dir, uuid + "_nii.zip");
             crow::response r{read_text_file(zip_path)};
             r.set_header("Content-Type", "application/zip");
@@ -1309,7 +2039,12 @@ inline void register_info_routes(crow::SimpleApp &app, InfoStore &store, const s
     CROW_ROUTE(app, "/api/project/<string>/download/processed/dcm").methods(crow::HTTPMethod::GET)([&store](const std::string &uuid){
         try {
             if (!store.exists(uuid)) throw std::runtime_error("project not found");
-            fs::path dir = store.base_path / uuid / "processed" / "dcm";
+            fs::path project_dir = store.base_path / uuid;
+            fs::path dir = project_dir / "processed" / "dcm";
+            if (list_files(dir).empty()) {
+                ensure_converted_from_npz_dir(project_dir / "processed" / "npzs", dir, "dcm", "label");
+                update_project_json_fields(project_dir / "project.json", {{"PD-dcm", "true"}});
+            }
             auto zip_path = create_zip_store(dir, uuid + "_processed_dcm.zip");
             crow::response r{read_text_file(zip_path)};
             r.set_header("Content-Type", "application/zip");
@@ -1325,7 +2060,12 @@ inline void register_info_routes(crow::SimpleApp &app, InfoStore &store, const s
     CROW_ROUTE(app, "/api/project/<string>/download/processed/nii").methods(crow::HTTPMethod::GET)([&store](const std::string &uuid){
         try {
             if (!store.exists(uuid)) throw std::runtime_error("project not found");
-            fs::path dir = store.base_path / uuid / "processed" / "nii";
+            fs::path project_dir = store.base_path / uuid;
+            fs::path dir = project_dir / "processed" / "nii";
+            if (list_files(dir).empty()) {
+                ensure_converted_from_npz_dir(project_dir / "processed" / "npzs", dir, "nii", "label");
+                update_project_json_fields(project_dir / "project.json", {{"PD-nii", "true"}});
+            }
             auto zip_path = create_zip_store(dir, uuid + "_processed_nii.zip");
             crow::response r{read_text_file(zip_path)};
             r.set_header("Content-Type", "application/zip");

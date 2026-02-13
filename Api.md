@@ -74,8 +74,9 @@
 - 方法：POST /api/project/{uuid}/inited
 - 请求体：`{ "raw": "png|npz|markednpz|dcm|nii" }`
 - 说明：
-	- 非 `npz/markednpz` 会先转为 `npz`（当前仅改后缀）并保存到 `db/{uuid}/npz`
+	- 非 `npz/markednpz` 会先转为 `npz` 并保存到 `db/{uuid}/npz`
 	- 非 `png` 会转为 `png` 并保存到 `db/{uuid}/png`
+	- 当 `raw` 为 `dcm/nii` 时，`png` 由“先转 `npz` 再转 `png`”链路生成
 	- `markednpz` 额外输出一张到 `db/{uuid}/markedpng`
 	- `temp` 文件夹会重命名为 `png/npz/dcm/nii`（`markednpz` 也保存到 `npz`）
 	- `project.json` 的 `raw` 更新为传入参数；若为 `dcm/nii`，对应字段设为 `raw`
@@ -122,7 +123,10 @@
 11) 开始处理（推理）
 - 方法：POST /api/project/{uuid}/start_analysis
 - 请求体：`{ "mode": "raw|semi" }`（也兼容 `PD` 或 `type`）
-- 说明：处理完成后保存到 `db/{uuid}/processed/npzs` 与 `db/{uuid}/processed/pngs`，并将 `project.json` 的 `processed` 设为 `raw` 或 `semi`
+- 说明：
+	- 处理完成后保存到 `db/{uuid}/processed/npzs`、`db/{uuid}/processed/pngs`、`db/{uuid}/processed/dcm`、`db/{uuid}/processed/nii`
+	- `processed/dcm` 由 `npz -> dcm` 生成，`processed/nii` 由 `npz -> nii` 生成
+	- `project.json` 的 `processed` 设为 `raw` 或 `semi`，并将 `PD-dcm`、`PD-nii` 设为 `true`
 - 返回：200，`{ "status": "ok" }`
 
 12) 获取处理过的图片列表

@@ -24,36 +24,18 @@
 ```text
 db/
 └─ {project-UUID}/      # 使用UUID管理各个project
-   ├─ temp/          # 临时文件缓存
+   ├─ temp/             # 临时文件缓存
+   ├─ 3d/               # 推理后生成的3d模型
+   ├─ OG3d/             # 推理后生成的3d模型（原始）
    ├─ pngs/
-   │  ├─ 1.png
-   │  ├─ *.png
-   │  └─ *.png
    ├─ npzs/
-   │  ├─ 1.npz
-   │  ├─ *.npz
-   │  └─ *.npz
    ├─ dcms/
-   │  ├─ 1.dcm
-   │  ├─ *.dcm
-   │  └─ *.dcm
    ├─ nii
    ├─ processed/        # 最终产物
    │  ├─ pngs/          # 推理后的图片（供前端显示）
-   │  │  ├─ 1-PD.png
-   │  │  ├─ *-PD.png
-   │  │  └─ *-PD.png
    │  ├─ npzs/          # 推理后的npz（推理产物）
-   │  │  ├─ 1-PD.npz
-   │  │  ├─ *-PD.npz
-   │  │  └─ *-PD.npz
    │  ├─ dcms/          # 推理后的npz转换为dcm（前端需求时才转换）
-   │  │  ├─ 1-PD.dcm
-   │  │  ├─ *-PD.dcm
-   │  │  └─ *-PD.dcm
    │  ├─ nii-PD         # 推理后的npz转换为nii（前端需求时才转换）
-   │  ├─ 3d/            # 推理后生成的3d模型
-   │  ├─ OG3d/          # 推理后生成的3d模型（原始）
    │  └─ project.json   # 存储了当前project的所有状态的json
    └ info.json          # 存储了当前database的所有project的json
 ```
