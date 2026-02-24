@@ -2069,50 +2069,122 @@ static inline std::string extract_text_from_doc(const fs::path &path)
 
 static inline std::string extract_text_from_epub(const fs::path &path)
 {
-    if (!command_exists("unzip")) {
-        throw std::runtime_error("解析 EPUB 需要 unzip");
-    }
+    auto is_html_like = [](const std::string &lower) {
+        return lower.size() >= 4 &&
+               (lower.rfind(".xhtml") == lower.size() - 6 ||
+                lower.rfind(".html") == lower.size() - 5 ||
+                lower.rfind(".htm") == lower.size() - 4);
+    };
 
-    std::string list_cmd = "unzip -Z1 " + shell_escape(path.string()) + " 2>/dev/null";
-    auto list_out = run_command_capture(list_cmd);
-    if (list_out.exit_code != 0) {
-        throw std::runtime_error("EPUB 条目读取失败");
-    }
-
-    std::vector<std::string> entries;
-    std::istringstream ss(list_out.output);
-    for (std::string line; std::getline(ss, line); ) {
-        line = trim_copy(line);
-        if (line.empty()) continue;
-        std::string lower = to_lower_copy(line);
-        if (lower.size() >= 6 && (lower.rfind(".xhtml") == lower.size() - 6 || lower.rfind(".html") == lower.size() - 5 || lower.rfind(".htm") == lower.size() - 4)) {
-            entries.push_back(line);
+    if (command_exists("unzip")) {
+        std::string list_cmd = "unzip -Z1 " + shell_escape(path.string()) + " 2>/dev/null";
+        auto list_out = run_command_capture(list_cmd);
+        if (list_out.exit_code != 0) {
+            throw std::runtime_error("EPUB 条目读取失败");
         }
+
+        std::vector<std::string> entries;
+        std::istringstream ss(list_out.output);
+        for (std::string line; std::getline(ss, line); ) {
+            line = trim_copy(line);
+            if (line.empty()) continue;
+            std::string lower = to_lower_copy(line);
+            if (is_html_like(lower)) {
+                entries.push_back(line);
+            }
+        }
+
+        if (entries.empty()) {
+            throw std::runtime_error("EPUB 未找到可读章节");
+        }
+
+        std::ostringstream joined;
+        int used = 0;
+        for (const auto &entry : entries) {
+            if (used >= 300) break;
+            std::string cmd = "unzip -p " + shell_escape(path.string()) + " " + shell_escape(entry) + " 2>/dev/null";
+            auto part_out = run_command_capture(cmd);
+            if (part_out.exit_code != 0) continue;
+            std::string part = strip_markup_to_text(part_out.output);
+            if (part.empty()) continue;
+            if (used > 0) joined << "\\n\\n";
+            joined << part;
+            ++used;
+        }
+
+        std::string text = trim_copy(joined.str());
+        if (text.empty()) {
+            throw std::runtime_error("EPUB 未提取到可用文本");
+        }
+        return text;
     }
 
-    if (entries.empty()) {
-        throw std::runtime_error("EPUB 未找到可读章节");
-    }
+#ifdef _WIN32
+    fs::path temp_dir = fs::temp_directory_path() / ("rag_epub_" + random_hex_id(10));
+    fs::create_directories(temp_dir);
 
-    std::ostringstream joined;
-    int used = 0;
-    for (const auto &entry : entries) {
-        if (used >= 300) break;
-        std::string cmd = "unzip -p " + shell_escape(path.string()) + " " + shell_escape(entry) + " 2>/dev/null";
-        auto part_out = run_command_capture(cmd);
-        if (part_out.exit_code != 0) continue;
-        std::string part = strip_markup_to_text(part_out.output);
-        if (part.empty()) continue;
-        if (used > 0) joined << "\\n\\n";
-        joined << part;
-        ++used;
-    }
+    auto cleanup = [&]() {
+        std::error_code ec;
+        fs::remove_all(temp_dir, ec);
+    };
 
-    std::string text = trim_copy(joined.str());
-    if (text.empty()) {
-        throw std::runtime_error("EPUB 未提取到可用文本");
+    try {
+        std::string src = powershell_single_quote_escape(path.string());
+        std::string dst = powershell_single_quote_escape(temp_dir.string());
+        std::string expand_cmd =
+            "powershell -NoProfile -NonInteractive -Command \"Expand-Archive -LiteralPath '" +
+            src +
+            "' -DestinationPath '" +
+            dst +
+            "' -Force\"";
+
+        auto expand_out = run_command_capture(expand_cmd);
+        if (expand_out.exit_code != 0) {
+            cleanup();
+            throw std::runtime_error("EPUB 解压失败");
+        }
+
+        std::vector<fs::path> entries;
+        for (auto &entry : fs::recursive_directory_iterator(temp_dir)) {
+            if (!entry.is_regular_file()) continue;
+            std::string lower = to_lower_copy(entry.path().extension().string());
+            if (is_html_like(lower)) {
+                entries.push_back(entry.path());
+            }
+        }
+        std::sort(entries.begin(), entries.end());
+
+        if (entries.empty()) {
+            cleanup();
+            throw std::runtime_error("EPUB 未找到可读章节");
+        }
+
+        std::ostringstream joined;
+        int used = 0;
+        for (const auto &entry : entries) {
+            if (used >= 300) break;
+            std::string raw = read_text_file(entry);
+            raw.erase(std::remove(raw.begin(), raw.end(), '\0'), raw.end());
+            std::string part = strip_markup_to_text(raw);
+            if (part.empty()) continue;
+            if (used > 0) joined << "\\n\\n";
+            joined << part;
+            ++used;
+        }
+
+        cleanup();
+        std::string text = trim_copy(joined.str());
+        if (text.empty()) {
+            throw std::runtime_error("EPUB 未提取到可用文本");
+        }
+        return text;
+    } catch (...) {
+        cleanup();
+        throw;
     }
-    return text;
+#else
+    throw std::runtime_error("解析 EPUB 需要 unzip");
+#endif
 }
 
 static inline std::string extract_text_for_rag(const fs::path &path)
@@ -2638,13 +2710,27 @@ inline void register_info_routes(crow::SimpleApp &app, InfoStore &store, const s
 
             auto files = list_rag_docs_for_index(store);
             std::vector<std::string> docs;
+            int parse_failed = 0;
+            std::string first_error;
             for (const auto &p : files) {
                 try {
                     std::string text = extract_text_for_rag(p);
                     if (!text.empty()) docs.push_back(std::move(text));
-                } catch (...) {
-                    continue;
+                } catch (const std::exception &ex) {
+                    ++parse_failed;
+                    if (first_error.empty()) {
+                        first_error = p.filename().string() + ": " + ex.what();
+                    }
                 }
+            }
+
+            if (!files.empty() && docs.empty()) {
+                std::string msg = "RAG 文档存在，但未提取到可索引文本";
+                msg += "（失败 " + std::to_string(parse_failed) + "/" + std::to_string(files.size()) + "）";
+                if (!first_error.empty()) {
+                    msg += "，示例错误: " + first_error;
+                }
+                throw std::runtime_error(msg);
             }
 
             RagIndex index;
