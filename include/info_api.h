@@ -24,6 +24,11 @@
 #include <optional>
 #ifndef _WIN32
 #include <sys/wait.h>
+#else
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
 #endif
 #include <onnxruntime/onnxruntime_cxx_api.h>
 #include "cnpy.h"
@@ -1886,6 +1891,42 @@ static inline std::string sanitize_utf8_text(const std::string &input)
     return trim_copy(out);
 }
 
+static inline bool is_valid_utf8_text(const std::string &input)
+{
+    std::size_t i = 0;
+    while (i < input.size()) {
+        uint32_t cp = 0;
+        std::size_t len = 0;
+        if (!utf8_decode_at_global(input, i, cp, len)) {
+            return false;
+        }
+        i += len;
+    }
+    return true;
+}
+
+#ifdef _WIN32
+static inline std::string acp_to_utf8(const std::string &input)
+{
+    if (input.empty()) return {};
+
+    int wide_len = MultiByteToWideChar(CP_ACP, 0, input.data(), static_cast<int>(input.size()), nullptr, 0);
+    if (wide_len <= 0) return {};
+
+    std::wstring wide(static_cast<std::size_t>(wide_len), L'\0');
+    int converted_wide = MultiByteToWideChar(CP_ACP, 0, input.data(), static_cast<int>(input.size()), wide.data(), wide_len);
+    if (converted_wide <= 0) return {};
+
+    int utf8_len = WideCharToMultiByte(CP_UTF8, 0, wide.data(), converted_wide, nullptr, 0, nullptr, nullptr);
+    if (utf8_len <= 0) return {};
+
+    std::string utf8(static_cast<std::size_t>(utf8_len), '\0');
+    int converted_utf8 = WideCharToMultiByte(CP_UTF8, 0, wide.data(), converted_wide, utf8.data(), utf8_len, nullptr, nullptr);
+    if (converted_utf8 <= 0) return {};
+    return utf8;
+}
+#endif
+
 static inline std::string json_escape(const std::string &s)
 {
     std::string out;
@@ -2109,7 +2150,25 @@ static inline std::string extract_text_for_rag(const fs::path &path)
     std::string content = read_text_file(path);
     content.erase(std::remove(content.begin(), content.end(), '\0'), content.end());
     content = std::regex_replace(content, std::regex("[\\r\\f\\v]+"), "\n");
-    return trim_copy(sanitize_utf8_text(content));
+
+    std::string sanitized = trim_copy(sanitize_utf8_text(content));
+    if (!sanitized.empty() || is_valid_utf8_text(content)) {
+        return sanitized;
+    }
+
+#ifdef _WIN32
+    std::string utf8_from_acp = acp_to_utf8(content);
+    if (!utf8_from_acp.empty()) {
+        utf8_from_acp.erase(std::remove(utf8_from_acp.begin(), utf8_from_acp.end(), '\0'), utf8_from_acp.end());
+        utf8_from_acp = std::regex_replace(utf8_from_acp, std::regex("[\\r\\f\\v]+"), "\n");
+        std::string fallback = trim_copy(sanitize_utf8_text(utf8_from_acp));
+        if (!fallback.empty()) {
+            return fallback;
+        }
+    }
+#endif
+
+    return sanitized;
 }
 
 static inline fs::path rag_db_dir(const InfoStore &store)
