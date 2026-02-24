@@ -1771,7 +1771,12 @@ static inline CommandResult run_command_capture(const std::string &command)
     std::array<char, 4096> buffer{};
     std::string result;
 
-    FILE *pipe = popen(command.c_str(), "r");
+    FILE *pipe = nullptr;
+#ifdef _WIN32
+    pipe = _popen(command.c_str(), "r");
+#else
+    pipe = popen(command.c_str(), "r");
+#endif
     if (!pipe) {
         throw std::runtime_error("无法执行系统命令");
     }
@@ -1780,7 +1785,12 @@ static inline CommandResult run_command_capture(const std::string &command)
         result.append(buffer.data());
     }
 
-    int status = pclose(pipe);
+    int status = 0;
+#ifdef _WIN32
+    status = _pclose(pipe);
+#else
+    status = pclose(pipe);
+#endif
     int exit_code = status;
 #ifndef _WIN32
     if (WIFEXITED(status)) {
