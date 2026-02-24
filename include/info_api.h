@@ -1802,7 +1802,12 @@ static inline CommandResult run_command_capture(const std::string &command)
 
 static inline bool command_exists(const std::string &cmd)
 {
-    const std::string check = "command -v " + cmd + " >/dev/null 2>&1";
+    std::string check;
+#ifdef _WIN32
+    check = "where " + cmd + " >NUL 2>NUL";
+#else
+    check = "command -v " + cmd + " >/dev/null 2>&1";
+#endif
     return std::system(check.c_str()) == 0;
 }
 
@@ -2074,9 +2079,14 @@ static inline std::string extract_text_for_rag(const fs::path &path)
     std::string ext = lower_ext(path);
     if (ext == ".pdf") {
         if (!command_exists("pdftotext")) {
-            throw std::runtime_error("缺少 pdftotext，请先安装 brew install poppler");
+            throw std::runtime_error("缺少 pdftotext，请先安装 poppler 并确保 pdftotext 在 PATH 中");
         }
-        std::string cmd = "pdftotext -q " + shell_escape(path.string()) + " - 2>/dev/null";
+        std::string cmd;
+#ifdef _WIN32
+        cmd = "pdftotext -q " + shell_escape(path.string()) + " - 2>nul";
+#else
+        cmd = "pdftotext -q " + shell_escape(path.string()) + " - 2>/dev/null";
+#endif
         auto out = run_command_capture(cmd);
         if (out.exit_code != 0) {
             throw std::runtime_error("PDF 解析失败");
