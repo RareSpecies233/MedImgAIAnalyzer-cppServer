@@ -2230,10 +2230,24 @@ static inline std::string llm_chat_completion(const LlmSettings &settings,
     while (!base.empty() && base.back() == '/') base.pop_back();
     std::string url = base + "/chat/completions";
 
-    std::string cmd = "curl -sS -X POST " + shell_escape(url) +
-                      " -H " + shell_escape("Content-Type: application/json") +
-                      " -H " + shell_escape("Authorization: Bearer " + settings.api_key) +
-                      " --data-binary @" + shell_escape(tmp_payload.string()) + " 2>&1";
+    std::string cmd;
+#ifdef _WIN32
+    std::string ps_url = powershell_single_quote_escape(url);
+    std::string ps_api_key = powershell_single_quote_escape(settings.api_key);
+    std::string ps_payload = powershell_single_quote_escape(tmp_payload.string());
+    cmd = "powershell -NoProfile -NonInteractive -Command \""
+          "$ErrorActionPreference='Stop'; "
+          "$u='" + ps_url + "'; "
+          "$h1='Content-Type: application/json'; "
+          "$h2='Authorization: Bearer " + ps_api_key + "'; "
+          "$p='" + ps_payload + "'; "
+          "& curl.exe -sS -X POST $u -H $h1 -H $h2 --data-binary ('@' + $p) 2>&1\"";
+#else
+    cmd = "curl -sS -X POST " + shell_escape(url) +
+          " -H " + shell_escape("Content-Type: application/json") +
+          " -H " + shell_escape("Authorization: Bearer " + settings.api_key) +
+          " --data-binary @" + shell_escape(tmp_payload.string()) + " 2>&1";
+#endif
 
     CommandResult res;
     try {
