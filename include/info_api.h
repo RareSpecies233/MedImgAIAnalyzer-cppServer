@@ -1570,7 +1570,7 @@ public:
         for (const auto &doc : documents) {
             auto pieces = split_chunks(doc, chunk_size, overlap);
             for (const auto &piece : pieces) {
-                auto tokens = tokenize_ascii(piece);
+                auto tokens = tokenize_mixed(piece);
                 if (tokens.empty()) continue;
 
                 RagChunkDoc item;
@@ -1600,7 +1600,7 @@ public:
 
     std::vector<std::string> retrieve(const std::string &query, int top_k = 4) const {
         if (docs_.empty()) return {};
-        auto q_tokens = tokenize_ascii(query);
+        auto q_tokens = tokenize_mixed(query);
         if (q_tokens.empty()) return {};
 
         const double k1 = 1.5;
@@ -1653,9 +1653,45 @@ private:
         return s;
     }
 
-    static std::vector<std::string> tokenize_ascii(const std::string &text) {
+    static bool utf8_decode_at(const std::string &s, std::size_t i, uint32_t &cp, std::size_t &len) {
+        unsigned char c0 = static_cast<unsigned char>(s[i]);
+        if (c0 < 0x80) {
+            cp = c0;
+            len = 1;
+            return true;
+        }
+        if ((c0 >> 5) == 0x6 && i + 1 < s.size()) {
+            unsigned char c1 = static_cast<unsigned char>(s[i + 1]);
+            if ((c1 & 0xC0) != 0x80) return false;
+            cp = ((c0 & 0x1F) << 6) | (c1 & 0x3F);
+            len = 2;
+            return true;
+        }
+        if ((c0 >> 4) == 0xE && i + 2 < s.size()) {
+            unsigned char c1 = static_cast<unsigned char>(s[i + 1]);
+            unsigned char c2 = static_cast<unsigned char>(s[i + 2]);
+            if ((c1 & 0xC0) != 0x80 || (c2 & 0xC0) != 0x80) return false;
+            cp = ((c0 & 0x0F) << 12) | ((c1 & 0x3F) << 6) | (c2 & 0x3F);
+            len = 3;
+            return true;
+        }
+        if ((c0 >> 3) == 0x1E && i + 3 < s.size()) {
+            unsigned char c1 = static_cast<unsigned char>(s[i + 1]);
+            unsigned char c2 = static_cast<unsigned char>(s[i + 2]);
+            unsigned char c3 = static_cast<unsigned char>(s[i + 3]);
+            if ((c1 & 0xC0) != 0x80 || (c2 & 0xC0) != 0x80 || (c3 & 0xC0) != 0x80) return false;
+            cp = ((c0 & 0x07) << 18) | ((c1 & 0x3F) << 12) | ((c2 & 0x3F) << 6) | (c3 & 0x3F);
+            len = 4;
+            return true;
+        }
+        return false;
+    }
+
+    static std::vector<std::string> tokenize_mixed(const std::string &text) {
         std::vector<std::string> tokens;
+        std::vector<std::string> cjk_stream;
         std::size_t i = 0;
+
         while (i < text.size()) {
             unsigned char c = static_cast<unsigned char>(text[i]);
             if (std::isalnum(c) || c == '_') {
@@ -1666,8 +1702,29 @@ private:
                     ++i;
                 }
                 tokens.push_back(to_lower_ascii(text.substr(start, i - start)));
+                cjk_stream.clear();
             } else {
-                ++i;
+                uint32_t codepoint = 0;
+                std::size_t len = 0;
+                if (utf8_decode_at(text, i, codepoint, len)) {
+                    if (codepoint >= 0x4E00 && codepoint <= 0x9FFF) {
+                        std::string unit = text.substr(i, len);
+                        tokens.push_back(unit);
+                        cjk_stream.push_back(unit);
+                        if (cjk_stream.size() >= 2) {
+                            tokens.push_back(cjk_stream[cjk_stream.size() - 2] + cjk_stream[cjk_stream.size() - 1]);
+                        }
+                        if (cjk_stream.size() > 6) {
+                            cjk_stream.erase(cjk_stream.begin());
+                        }
+                    } else {
+                        cjk_stream.clear();
+                    }
+                    i += len;
+                } else {
+                    cjk_stream.clear();
+                    ++i;
+                }
             }
         }
         return tokens;
@@ -1745,6 +1802,73 @@ static inline std::string trim_copy(std::string s)
     return s;
 }
 
+static inline bool utf8_decode_at_global(const std::string &s, std::size_t i, uint32_t &cp, std::size_t &len)
+{
+    unsigned char c0 = static_cast<unsigned char>(s[i]);
+    if (c0 < 0x80) {
+        cp = c0;
+        len = 1;
+        return true;
+    }
+    if ((c0 >> 5) == 0x6 && i + 1 < s.size()) {
+        unsigned char c1 = static_cast<unsigned char>(s[i + 1]);
+        if ((c1 & 0xC0) != 0x80) return false;
+        cp = ((c0 & 0x1F) << 6) | (c1 & 0x3F);
+        len = 2;
+        return true;
+    }
+    if ((c0 >> 4) == 0xE && i + 2 < s.size()) {
+        unsigned char c1 = static_cast<unsigned char>(s[i + 1]);
+        unsigned char c2 = static_cast<unsigned char>(s[i + 2]);
+        if ((c1 & 0xC0) != 0x80 || (c2 & 0xC0) != 0x80) return false;
+        cp = ((c0 & 0x0F) << 12) | ((c1 & 0x3F) << 6) | (c2 & 0x3F);
+        len = 3;
+        return true;
+    }
+    if ((c0 >> 3) == 0x1E && i + 3 < s.size()) {
+        unsigned char c1 = static_cast<unsigned char>(s[i + 1]);
+        unsigned char c2 = static_cast<unsigned char>(s[i + 2]);
+        unsigned char c3 = static_cast<unsigned char>(s[i + 3]);
+        if ((c1 & 0xC0) != 0x80 || (c2 & 0xC0) != 0x80 || (c3 & 0xC0) != 0x80) return false;
+        cp = ((c0 & 0x07) << 18) | ((c1 & 0x3F) << 12) | ((c2 & 0x3F) << 6) | (c3 & 0x3F);
+        len = 4;
+        return true;
+    }
+    return false;
+}
+
+static inline std::string sanitize_utf8_text(const std::string &input)
+{
+    std::string out;
+    out.reserve(input.size());
+
+    std::size_t i = 0;
+    while (i < input.size()) {
+        uint32_t cp = 0;
+        std::size_t len = 0;
+        if (utf8_decode_at_global(input, i, cp, len)) {
+            if (cp == 0xFFFD || cp == 0xFEFF || cp == 0) {
+                i += len;
+                continue;
+            }
+
+            if (cp < 0x20 && cp != '\n' && cp != '\t' && cp != '\r') {
+                out.push_back(' ');
+            } else {
+                out.append(input, i, len);
+            }
+            i += len;
+        } else {
+            out.push_back(' ');
+            ++i;
+        }
+    }
+
+    out = std::regex_replace(out, std::regex("[ \\t\\r\\f\\v]+"), " ");
+    out = std::regex_replace(out, std::regex("\\n{3,}"), "\\n\\n");
+    return trim_copy(out);
+}
+
 static inline std::string json_escape(const std::string &s)
 {
     std::string out;
@@ -1758,7 +1882,18 @@ static inline std::string json_escape(const std::string &s)
             case '\n': out += "\\n"; break;
             case '\r': out += "\\r"; break;
             case '\t': out += "\\t"; break;
-            default: out += c; break;
+            default: {
+                unsigned char uc = static_cast<unsigned char>(c);
+                if (uc < 0x20) {
+                    static const char *hex = "0123456789ABCDEF";
+                    out += "\\u00";
+                    out.push_back(hex[(uc >> 4) & 0xF]);
+                    out.push_back(hex[uc & 0xF]);
+                } else {
+                    out += c;
+                }
+                break;
+            }
         }
     }
     return out;
@@ -1795,7 +1930,8 @@ static inline std::unordered_set<std::string> rag_text_extensions()
     return {
         ".txt", ".md", ".markdown", ".html", ".htm", ".csv", ".tsv", ".json", ".jsonl",
         ".xml", ".yaml", ".yml", ".ini", ".cfg", ".conf", ".log", ".rst", ".sql", ".py",
-        ".js", ".ts", ".java", ".c", ".cpp", ".h", ".hpp", ".go", ".rs", ".sh", ".pdf"
+        ".js", ".ts", ".java", ".c", ".cpp", ".h", ".hpp", ".go", ".rs", ".sh", ".pdf",
+        ".doc", ".docx", ".epub"
     };
 }
 
@@ -1810,6 +1946,117 @@ static inline bool rag_is_supported_file(const fs::path &path)
     return exts.find(lower_ext(path)) != exts.end();
 }
 
+static inline std::string replace_all_copy(std::string s, const std::string &from, const std::string &to)
+{
+    if (from.empty()) return s;
+    std::size_t pos = 0;
+    while ((pos = s.find(from, pos)) != std::string::npos) {
+        s.replace(pos, from.size(), to);
+        pos += to.size();
+    }
+    return s;
+}
+
+static inline std::string strip_markup_to_text(std::string markup)
+{
+    markup = std::regex_replace(markup, std::regex("<script[\\s\\S]*?</script>", std::regex::icase), " ");
+    markup = std::regex_replace(markup, std::regex("<style[\\s\\S]*?</style>", std::regex::icase), " ");
+    markup = std::regex_replace(markup, std::regex("<[^>]+>"), " ");
+
+    markup = replace_all_copy(markup, "&nbsp;", " ");
+    markup = replace_all_copy(markup, "&lt;", "<");
+    markup = replace_all_copy(markup, "&gt;", ">");
+    markup = replace_all_copy(markup, "&amp;", "&");
+    markup = replace_all_copy(markup, "&quot;", "\"");
+    markup = replace_all_copy(markup, "&#39;", "'");
+
+    markup = std::regex_replace(markup, std::regex("[ \\t\\r\\f\\v]+"), " ");
+    markup = std::regex_replace(markup, std::regex("\\n{3,}"), "\\n\\n");
+    return trim_copy(markup);
+}
+
+static inline std::string extract_text_from_docx(const fs::path &path)
+{
+    if (!command_exists("unzip")) {
+        throw std::runtime_error("解析 DOCX 需要 unzip");
+    }
+    std::string cmd = "unzip -p " + shell_escape(path.string()) + " word/document.xml 2>/dev/null";
+    auto out = run_command_capture(cmd);
+    if (out.exit_code != 0) {
+        throw std::runtime_error("DOCX 解析失败");
+    }
+    std::string text = strip_markup_to_text(out.output);
+    if (text.empty()) {
+        throw std::runtime_error("DOCX 未提取到可用文本");
+    }
+    return text;
+}
+
+static inline std::string extract_text_from_doc(const fs::path &path)
+{
+    if (!command_exists("textutil")) {
+        throw std::runtime_error("解析 DOC 需要 textutil");
+    }
+    std::string cmd = "textutil -convert txt -stdout " + shell_escape(path.string()) + " 2>/dev/null";
+    auto out = run_command_capture(cmd);
+    if (out.exit_code != 0) {
+        throw std::runtime_error("DOC 解析失败");
+    }
+    std::string text = trim_copy(out.output);
+    if (text.empty()) {
+        throw std::runtime_error("DOC 未提取到可用文本");
+    }
+    return text;
+}
+
+static inline std::string extract_text_from_epub(const fs::path &path)
+{
+    if (!command_exists("unzip")) {
+        throw std::runtime_error("解析 EPUB 需要 unzip");
+    }
+
+    std::string list_cmd = "unzip -Z1 " + shell_escape(path.string()) + " 2>/dev/null";
+    auto list_out = run_command_capture(list_cmd);
+    if (list_out.exit_code != 0) {
+        throw std::runtime_error("EPUB 条目读取失败");
+    }
+
+    std::vector<std::string> entries;
+    std::istringstream ss(list_out.output);
+    for (std::string line; std::getline(ss, line); ) {
+        line = trim_copy(line);
+        if (line.empty()) continue;
+        std::string lower = to_lower_copy(line);
+        if (lower.size() >= 6 && (lower.rfind(".xhtml") == lower.size() - 6 || lower.rfind(".html") == lower.size() - 5 || lower.rfind(".htm") == lower.size() - 4)) {
+            entries.push_back(line);
+        }
+    }
+
+    if (entries.empty()) {
+        throw std::runtime_error("EPUB 未找到可读章节");
+    }
+
+    std::ostringstream joined;
+    int used = 0;
+    for (const auto &entry : entries) {
+        if (used >= 300) break;
+        std::string cmd = "unzip -p " + shell_escape(path.string()) + " " + shell_escape(entry) + " 2>/dev/null";
+        auto part_out = run_command_capture(cmd);
+        if (part_out.exit_code != 0) continue;
+        std::string part = strip_markup_to_text(part_out.output);
+        if (part.empty()) continue;
+        if (used > 0) joined << "\\n\\n";
+        joined << part;
+        ++used;
+    }
+
+    std::string text = trim_copy(joined.str());
+    if (text.empty()) {
+        throw std::runtime_error("EPUB 未提取到可用文本");
+    }
+    return text;
+}
+
 static inline std::string extract_text_for_rag(const fs::path &path)
 {
     std::string ext = lower_ext(path);
@@ -1822,13 +2069,25 @@ static inline std::string extract_text_for_rag(const fs::path &path)
         if (out.exit_code != 0) {
             throw std::runtime_error("PDF 解析失败");
         }
-        return trim_copy(out.output);
+        return trim_copy(sanitize_utf8_text(out.output));
+    }
+
+    if (ext == ".docx") {
+        return sanitize_utf8_text(extract_text_from_docx(path));
+    }
+
+    if (ext == ".doc") {
+        return sanitize_utf8_text(extract_text_from_doc(path));
+    }
+
+    if (ext == ".epub") {
+        return sanitize_utf8_text(extract_text_from_epub(path));
     }
 
     std::string content = read_text_file(path);
     content.erase(std::remove(content.begin(), content.end(), '\0'), content.end());
     content = std::regex_replace(content, std::regex("[\\r\\f\\v]+"), "\n");
-    return trim_copy(content);
+    return trim_copy(sanitize_utf8_text(content));
 }
 
 static inline fs::path rag_db_dir(const InfoStore &store)
@@ -1907,11 +2166,23 @@ static inline std::vector<fs::path> list_rag_docs(const InfoStore &store)
     std::vector<fs::path> files;
     for (auto &p : fs::directory_iterator(dir)) {
         if (!p.is_regular_file()) continue;
-        if (!rag_is_supported_file(p.path())) continue;
         files.push_back(p.path());
     }
     std::sort(files.begin(), files.end());
     return files;
+}
+
+static inline std::vector<fs::path> list_rag_docs_for_index(const InfoStore &store)
+{
+    auto all = list_rag_docs(store);
+    std::vector<fs::path> out;
+    out.reserve(all.size());
+    for (const auto &p : all) {
+        if (rag_is_supported_file(p)) {
+            out.push_back(p);
+        }
+    }
+    return out;
 }
 
 static inline std::string original_name_from_rag_file(const fs::path &path)
@@ -1930,12 +2201,15 @@ static inline std::string llm_chat_completion(const LlmSettings &settings,
         throw std::runtime_error("llm 配置不完整，请先设置 base_url/api_key/model");
     }
 
+    std::string safe_question = sanitize_utf8_text(question);
+    std::string safe_system_prompt = sanitize_utf8_text(settings.system_prompt);
+
     std::ostringstream context_block;
     for (std::size_t i = 0; i < contexts.size(); ++i) {
-        context_block << "[片段 " << (i + 1) << "]\n" << contexts[i] << "\n\n";
+        context_block << "[片段 " << (i + 1) << "]\n" << sanitize_utf8_text(contexts[i]) << "\n\n";
     }
 
-    std::string system_prompt = settings.system_prompt;
+    std::string system_prompt = safe_system_prompt;
     if (!contexts.empty()) {
         system_prompt += "\n\n以下是可用知识片段：\n" + context_block.str();
     }
@@ -1946,7 +2220,7 @@ static inline std::string llm_chat_completion(const LlmSettings &settings,
     payload << "\"temperature\":" << settings.temperature << ",";
     payload << "\"messages\":[";
     payload << "{\"role\":\"system\",\"content\":\"" << json_escape(system_prompt) << "\"},";
-    payload << "{\"role\":\"user\",\"content\":\"" << json_escape(question) << "\"}";
+    payload << "{\"role\":\"user\",\"content\":\"" << json_escape(safe_question) << "\"}";
     payload << "]}";
 
     fs::path tmp_payload = fs::temp_directory_path() / ("llm_payload_" + random_hex_id(12) + ".json");
@@ -2142,6 +2416,90 @@ inline void register_info_routes(crow::SimpleApp &app, InfoStore &store, const s
         }
     });
 
+    CROW_ROUTE(app, "/api/llm/rag/documents/<path>").methods(crow::HTTPMethod::DELETE)([&store](const std::string &name) {
+        try {
+            if (name.empty() || name.find("..") != std::string::npos || name.find('/') != std::string::npos || name.find('\\') != std::string::npos) {
+                throw std::runtime_error("invalid name");
+            }
+
+            auto files = list_rag_docs(store);
+            int deleted = 0;
+            for (const auto &path : files) {
+                std::string raw_name = original_name_from_rag_file(path);
+                std::string disk_name = path.filename().string();
+                if (raw_name == name || disk_name == name) {
+                    std::error_code ec;
+                    fs::remove(path, ec);
+                    if (ec) {
+                        throw std::runtime_error("删除文件失败: " + ec.message());
+                    }
+                    ++deleted;
+                }
+            }
+
+            if (deleted == 0) {
+                crow::response r{"{\"error\":\"document not found\"}"};
+                r.code = 404;
+                set_json_headers(r);
+                return r;
+            }
+
+            crow::json::wvalue res;
+            res["status"] = "ok";
+            res["deleted"] = deleted;
+            res["name"] = name;
+            crow::response r{res};
+            r.code = 200;
+            set_json_headers(r);
+            return r;
+        } catch (const std::exception &e) {
+            crow::response r{std::string("{\"error\":\"") + e.what() + "\"}"};
+            r.code = 400;
+            set_json_headers(r);
+            return r;
+        }
+    });
+
+    CROW_ROUTE(app, "/api/llm/rag/download/<path>").methods(crow::HTTPMethod::GET)([&store](const std::string &name) {
+        try {
+            if (name.empty() || name.find("..") != std::string::npos || name.find('/') != std::string::npos || name.find('\\') != std::string::npos) {
+                throw std::runtime_error("invalid name");
+            }
+
+            auto files = list_rag_docs(store);
+            fs::path target_path;
+            std::string download_name;
+            for (const auto &path : files) {
+                std::string raw_name = original_name_from_rag_file(path);
+                std::string disk_name = path.filename().string();
+                if (raw_name == name || disk_name == name) {
+                    target_path = path;
+                    download_name = raw_name;
+                    break;
+                }
+            }
+
+            if (target_path.empty() || !fs::exists(target_path)) {
+                crow::response r{"{\"error\":\"document not found\"}"};
+                r.code = 404;
+                set_json_headers(r);
+                return r;
+            }
+
+            crow::response r{read_text_file(target_path)};
+            r.set_header("Content-Type", "application/octet-stream");
+            r.set_header("Content-Disposition", "attachment; filename=\"" + download_name + "\"");
+            r.set_header("Access-Control-Allow-Origin", "*");
+            r.code = 200;
+            return r;
+        } catch (const std::exception &e) {
+            crow::response r{std::string("{\"error\":\"") + e.what() + "\"}"};
+            r.code = 400;
+            set_json_headers(r);
+            return r;
+        }
+    });
+
     CROW_ROUTE(app, "/api/llm/rag/download").methods(crow::HTTPMethod::GET)([&store]() {
         try {
             fs::path dir = rag_db_dir(store);
@@ -2183,7 +2541,7 @@ inline void register_info_routes(crow::SimpleApp &app, InfoStore &store, const s
             if (cfg.top_k < 1) cfg.top_k = 1;
             if (cfg.top_k > 10) cfg.top_k = 10;
 
-            auto files = list_rag_docs(store);
+            auto files = list_rag_docs_for_index(store);
             std::vector<std::string> docs;
             for (const auto &p : files) {
                 try {
@@ -2944,6 +3302,24 @@ inline void register_info_routes(crow::SimpleApp &app, InfoStore &store, const s
     });
 
     CROW_ROUTE(app, "/api/llm/rag/documents").methods(crow::HTTPMethod::OPTIONS)([](){
+        crow::response r;
+        r.set_header("Access-Control-Allow-Origin", "*");
+        r.set_header("Access-Control-Allow-Methods", "GET, OPTIONS");
+        r.set_header("Access-Control-Allow-Headers", "Content-Type");
+        r.code = 204;
+        return r;
+    });
+
+    CROW_ROUTE(app, "/api/llm/rag/documents/<path>").methods(crow::HTTPMethod::OPTIONS)([](const std::string &){
+        crow::response r;
+        r.set_header("Access-Control-Allow-Origin", "*");
+        r.set_header("Access-Control-Allow-Methods", "DELETE, OPTIONS");
+        r.set_header("Access-Control-Allow-Headers", "Content-Type");
+        r.code = 204;
+        return r;
+    });
+
+    CROW_ROUTE(app, "/api/llm/rag/download/<path>").methods(crow::HTTPMethod::OPTIONS)([](const std::string &){
         crow::response r;
         r.set_header("Access-Control-Allow-Origin", "*");
         r.set_header("Access-Control-Allow-Methods", "GET, OPTIONS");

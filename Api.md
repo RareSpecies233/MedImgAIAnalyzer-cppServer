@@ -187,6 +187,18 @@
 - 方法：GET /api/llm/rag/documents
 - 返回：200，`{ "documents": [{"name":"...","size":123}], "count": 1 }`
 
+23.1) 删除单个 RAG 文档
+- 方法：DELETE /api/llm/rag/documents/{name}
+- 说明：按文档名删除（即列表接口中的 `name`）
+- 返回：200，`{ "status": "ok", "deleted": 1, "name": "..." }`
+- 未找到：404，`{ "error": "document not found" }`
+
+23.2) 下载单个 RAG 文档
+- 方法：GET /api/llm/rag/download/{name}
+- 说明：按文档名下载原始文件（即列表接口中的 `name`）
+- 返回：200，文件二进制（`Content-Disposition: attachment`）
+- 未找到：404，`{ "error": "document not found" }`
+
 24) 下载 RAG 文档
 - 方法：GET /api/llm/rag/download
 - 返回：ZIP（二进制，`llm_rag_documents.zip`）
