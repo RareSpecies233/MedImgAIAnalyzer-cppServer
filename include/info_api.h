@@ -17,6 +17,12 @@
 #include <cstdint>
 #include <cstring>
 #include <random>
+#include <unordered_map>
+#include <unordered_set>
+#include <regex>
+#include <cstdio>
+#include <optional>
+#include <sys/wait.h>
 #include <onnxruntime/onnxruntime_cxx_api.h>
 #include "cnpy.h"
 #include "info_store.h"
@@ -1535,7 +1541,686 @@ static inline void ensure_converted_from_npz_dir(const fs::path &npz_dir,
     }
 }
 
+struct LlmSettings {
+    std::string base_url;
+    std::string api_key;
+    std::string model;
+    std::string system_prompt;
+    double temperature{0.2};
+    int top_k{4};
+};
+
+struct RagChunkDoc {
+    std::string text;
+    std::vector<std::string> tokens;
+    std::unordered_map<std::string, int> tf;
+};
+
+class RagIndex {
+public:
+    void clear() {
+        docs_.clear();
+        doc_freq_.clear();
+        avg_doc_len_ = 0.0;
+    }
+
+    int index_documents(const std::vector<std::string> &documents, int chunk_size = 500, int overlap = 80) {
+        clear();
+
+        for (const auto &doc : documents) {
+            auto pieces = split_chunks(doc, chunk_size, overlap);
+            for (const auto &piece : pieces) {
+                auto tokens = tokenize_ascii(piece);
+                if (tokens.empty()) continue;
+
+                RagChunkDoc item;
+                item.text = piece;
+                item.tokens = std::move(tokens);
+                for (const auto &token : item.tokens) {
+                    item.tf[token] += 1;
+                }
+                docs_.push_back(std::move(item));
+            }
+        }
+
+        if (docs_.empty()) {
+            return 0;
+        }
+
+        std::size_t total_len = 0;
+        for (const auto &doc : docs_) {
+            total_len += doc.tokens.size();
+            std::unordered_set<std::string> unique;
+            for (const auto &t : doc.tokens) unique.insert(t);
+            for (const auto &t : unique) doc_freq_[t] += 1;
+        }
+        avg_doc_len_ = static_cast<double>(total_len) / static_cast<double>(docs_.size());
+        return static_cast<int>(docs_.size());
+    }
+
+    std::vector<std::string> retrieve(const std::string &query, int top_k = 4) const {
+        if (docs_.empty()) return {};
+        auto q_tokens = tokenize_ascii(query);
+        if (q_tokens.empty()) return {};
+
+        const double k1 = 1.5;
+        const double b = 0.75;
+
+        std::vector<std::pair<int, double>> scored;
+        for (int i = 0; i < static_cast<int>(docs_.size()); ++i) {
+            const auto &doc = docs_[static_cast<std::size_t>(i)];
+            const double doc_len = static_cast<double>(doc.tokens.size());
+            double score = 0.0;
+            for (const auto &qt : q_tokens) {
+                auto it = doc.tf.find(qt);
+                if (it == doc.tf.end()) continue;
+                const double tf = static_cast<double>(it->second);
+                const double norm = tf + k1 * (1.0 - b + b * doc_len / std::max(1e-6, avg_doc_len_));
+                score += idf(qt) * (tf * (k1 + 1.0)) / norm;
+            }
+            if (score > 0.0) scored.push_back({i, score});
+        }
+
+        std::sort(scored.begin(), scored.end(), [](const auto &a, const auto &b) {
+            return a.second > b.second;
+        });
+
+        std::vector<std::string> out;
+        int limit = std::min(top_k, static_cast<int>(scored.size()));
+        out.reserve(static_cast<std::size_t>(limit));
+        for (int i = 0; i < limit; ++i) {
+            out.push_back(docs_[static_cast<std::size_t>(scored[static_cast<std::size_t>(i)].first)].text);
+        }
+        return out;
+    }
+
+    std::size_t chunk_count() const {
+        return docs_.size();
+    }
+
+private:
+    static std::string to_lower_ascii(std::string input) {
+        std::transform(input.begin(), input.end(), input.begin(), [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
+        return input;
+    }
+
+    static std::string trim_copy(std::string s) {
+        auto not_space = [](unsigned char ch) { return !std::isspace(ch); };
+        s.erase(s.begin(), std::find_if(s.begin(), s.end(), not_space));
+        s.erase(std::find_if(s.rbegin(), s.rend(), not_space).base(), s.end());
+        return s;
+    }
+
+    static std::vector<std::string> tokenize_ascii(const std::string &text) {
+        std::vector<std::string> tokens;
+        std::size_t i = 0;
+        while (i < text.size()) {
+            unsigned char c = static_cast<unsigned char>(text[i]);
+            if (std::isalnum(c) || c == '_') {
+                std::size_t start = i;
+                while (i < text.size()) {
+                    unsigned char ch = static_cast<unsigned char>(text[i]);
+                    if (!(std::isalnum(ch) || ch == '_')) break;
+                    ++i;
+                }
+                tokens.push_back(to_lower_ascii(text.substr(start, i - start)));
+            } else {
+                ++i;
+            }
+        }
+        return tokens;
+    }
+
+    static std::vector<std::string> split_chunks(const std::string &text, int chunk_size, int overlap) {
+        std::string cleaned = trim_copy(text);
+        if (cleaned.empty()) return {};
+        if (static_cast<int>(cleaned.size()) <= chunk_size) return {cleaned};
+
+        int step = std::max(1, chunk_size - overlap);
+        std::vector<std::string> chunks;
+        for (int start = 0; start < static_cast<int>(cleaned.size()); start += step) {
+            int end = std::min(start + chunk_size, static_cast<int>(cleaned.size()));
+            std::string part = trim_copy(cleaned.substr(static_cast<std::size_t>(start), static_cast<std::size_t>(end - start)));
+            if (!part.empty()) chunks.push_back(std::move(part));
+            if (end >= static_cast<int>(cleaned.size())) break;
+        }
+        return chunks;
+    }
+
+    double idf(const std::string &token) const {
+        const double n_docs = static_cast<double>(docs_.size());
+        double freq = 0.0;
+        auto it = doc_freq_.find(token);
+        if (it != doc_freq_.end()) freq = static_cast<double>(it->second);
+        return std::log(1.0 + (n_docs - freq + 0.5) / (freq + 0.5));
+    }
+
+    std::vector<RagChunkDoc> docs_;
+    std::unordered_map<std::string, int> doc_freq_;
+    double avg_doc_len_{0.0};
+};
+
+struct CommandResult {
+    int exit_code;
+    std::string output;
+};
+
+static inline CommandResult run_command_capture(const std::string &command)
+{
+    std::array<char, 4096> buffer{};
+    std::string result;
+
+    FILE *pipe = popen(command.c_str(), "r");
+    if (!pipe) {
+        throw std::runtime_error("无法执行系统命令");
+    }
+
+    while (fgets(buffer.data(), static_cast<int>(buffer.size()), pipe) != nullptr) {
+        result.append(buffer.data());
+    }
+
+    int status = pclose(pipe);
+    int exit_code = status;
+#ifndef _WIN32
+    if (WIFEXITED(status)) {
+        exit_code = WEXITSTATUS(status);
+    }
+#endif
+    return {exit_code, result};
+}
+
+static inline bool command_exists(const std::string &cmd)
+{
+    const std::string check = "command -v " + cmd + " >/dev/null 2>&1";
+    return std::system(check.c_str()) == 0;
+}
+
+static inline std::string trim_copy(std::string s)
+{
+    auto not_space = [](unsigned char ch) { return !std::isspace(ch); };
+    s.erase(s.begin(), std::find_if(s.begin(), s.end(), not_space));
+    s.erase(std::find_if(s.rbegin(), s.rend(), not_space).base(), s.end());
+    return s;
+}
+
+static inline std::string json_escape(const std::string &s)
+{
+    std::string out;
+    out.reserve(s.size() + 8);
+    for (char c : s) {
+        switch (c) {
+            case '"': out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\b': out += "\\b"; break;
+            case '\f': out += "\\f"; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default: out += c; break;
+        }
+    }
+    return out;
+}
+
+static inline std::string sanitize_filename(const std::string &name)
+{
+    std::string out;
+    out.reserve(name.size());
+    for (unsigned char c : name) {
+        if (std::isalnum(c) || c == '_' || c == '-' || c == '.') {
+            out.push_back(static_cast<char>(c));
+        }
+    }
+    if (out.empty()) return "document.txt";
+    return out;
+}
+
+static inline std::string random_hex_id(std::size_t length = 16)
+{
+    static thread_local std::mt19937_64 rng{std::random_device{}()};
+    static constexpr char kHex[] = "0123456789abcdef";
+    std::uniform_int_distribution<int> dist(0, 15);
+    std::string id;
+    id.reserve(length);
+    for (std::size_t i = 0; i < length; ++i) {
+        id.push_back(kHex[dist(rng)]);
+    }
+    return id;
+}
+
+static inline std::unordered_set<std::string> rag_text_extensions()
+{
+    return {
+        ".txt", ".md", ".markdown", ".html", ".htm", ".csv", ".tsv", ".json", ".jsonl",
+        ".xml", ".yaml", ".yml", ".ini", ".cfg", ".conf", ".log", ".rst", ".sql", ".py",
+        ".js", ".ts", ".java", ".c", ".cpp", ".h", ".hpp", ".go", ".rs", ".sh", ".pdf"
+    };
+}
+
+static inline std::string lower_ext(const fs::path &path)
+{
+    return to_lower_copy(path.extension().string());
+}
+
+static inline bool rag_is_supported_file(const fs::path &path)
+{
+    static const auto exts = rag_text_extensions();
+    return exts.find(lower_ext(path)) != exts.end();
+}
+
+static inline std::string extract_text_for_rag(const fs::path &path)
+{
+    std::string ext = lower_ext(path);
+    if (ext == ".pdf") {
+        if (!command_exists("pdftotext")) {
+            throw std::runtime_error("缺少 pdftotext，请先安装 brew install poppler");
+        }
+        std::string cmd = "pdftotext -q " + shell_escape(path.string()) + " - 2>/dev/null";
+        auto out = run_command_capture(cmd);
+        if (out.exit_code != 0) {
+            throw std::runtime_error("PDF 解析失败");
+        }
+        return trim_copy(out.output);
+    }
+
+    std::string content = read_text_file(path);
+    content.erase(std::remove(content.begin(), content.end(), '\0'), content.end());
+    content = std::regex_replace(content, std::regex("[\\r\\f\\v]+"), "\n");
+    return trim_copy(content);
+}
+
+static inline fs::path rag_db_dir(const InfoStore &store)
+{
+    return store.base_path / "llmdb";
+}
+
+static inline fs::path llm_settings_path(const InfoStore &store)
+{
+    return store.base_path / "llm.json";
+}
+
+static inline std::string llm_settings_to_json(const LlmSettings &cfg)
+{
+    std::ostringstream ss;
+    ss << "{\n";
+    ss << "  \"base_url\": \"" << json_escape(cfg.base_url) << "\",\n";
+    ss << "  \"api_key\": \"" << json_escape(cfg.api_key) << "\",\n";
+    ss << "  \"model\": \"" << json_escape(cfg.model) << "\",\n";
+    ss << "  \"temperature\": " << std::fixed << std::setprecision(3) << cfg.temperature << ",\n";
+    ss << "  \"top_k\": " << cfg.top_k << ",\n";
+    ss << "  \"system_prompt\": \"" << json_escape(cfg.system_prompt) << "\"\n";
+    ss << "}\n";
+    return ss.str();
+}
+
+static inline LlmSettings default_llm_settings()
+{
+    LlmSettings cfg;
+    cfg.base_url = "";
+    cfg.api_key = "";
+    cfg.model = "";
+    cfg.temperature = 0.2;
+    cfg.top_k = 4;
+    cfg.system_prompt = "你是一个严谨的医学影像助手。请仅根据提供的上下文作答，若上下文不足请明确说明。";
+    return cfg;
+}
+
+static inline LlmSettings load_llm_settings(const InfoStore &store)
+{
+    fs::path path = llm_settings_path(store);
+    if (!fs::exists(path)) {
+        auto cfg = default_llm_settings();
+        write_text_file(path, llm_settings_to_json(cfg));
+        return cfg;
+    }
+
+    auto cfg = default_llm_settings();
+    std::string body = read_text_file(path);
+    auto doc = crow::json::load(body);
+    if (!doc) return cfg;
+
+    if (doc.has("base_url") && doc["base_url"].t() == crow::json::type::String) cfg.base_url = doc["base_url"].s();
+    if (doc.has("api_key") && doc["api_key"].t() == crow::json::type::String) cfg.api_key = doc["api_key"].s();
+    if (doc.has("model") && doc["model"].t() == crow::json::type::String) cfg.model = doc["model"].s();
+    if (doc.has("temperature") && doc["temperature"].t() == crow::json::type::Number) cfg.temperature = doc["temperature"].d();
+    if (doc.has("top_k") && doc["top_k"].t() == crow::json::type::Number) cfg.top_k = static_cast<int>(doc["top_k"].i());
+    if (doc.has("system_prompt") && doc["system_prompt"].t() == crow::json::type::String) cfg.system_prompt = doc["system_prompt"].s();
+
+    if (cfg.top_k < 1) cfg.top_k = 1;
+    if (cfg.top_k > 10) cfg.top_k = 10;
+    if (cfg.temperature < 0.0) cfg.temperature = 0.0;
+    if (cfg.temperature > 2.0) cfg.temperature = 2.0;
+    return cfg;
+}
+
+static inline void save_llm_settings(const InfoStore &store, const LlmSettings &cfg)
+{
+    write_text_file(llm_settings_path(store), llm_settings_to_json(cfg));
+}
+
+static inline std::vector<fs::path> list_rag_docs(const InfoStore &store)
+{
+    fs::path dir = rag_db_dir(store);
+    fs::create_directories(dir);
+    std::vector<fs::path> files;
+    for (auto &p : fs::directory_iterator(dir)) {
+        if (!p.is_regular_file()) continue;
+        if (!rag_is_supported_file(p.path())) continue;
+        files.push_back(p.path());
+    }
+    std::sort(files.begin(), files.end());
+    return files;
+}
+
+static inline std::string original_name_from_rag_file(const fs::path &path)
+{
+    std::string name = path.filename().string();
+    auto pos = name.find("__");
+    if (pos == std::string::npos || pos + 2 >= name.size()) return name;
+    return name.substr(pos + 2);
+}
+
+static inline std::string llm_chat_completion(const LlmSettings &settings,
+                                              const std::string &question,
+                                              const std::vector<std::string> &contexts)
+{
+    if (settings.base_url.empty() || settings.api_key.empty() || settings.model.empty()) {
+        throw std::runtime_error("llm 配置不完整，请先设置 base_url/api_key/model");
+    }
+
+    std::ostringstream context_block;
+    for (std::size_t i = 0; i < contexts.size(); ++i) {
+        context_block << "[片段 " << (i + 1) << "]\n" << contexts[i] << "\n\n";
+    }
+
+    std::string system_prompt = settings.system_prompt;
+    if (!contexts.empty()) {
+        system_prompt += "\n\n以下是可用知识片段：\n" + context_block.str();
+    }
+
+    std::ostringstream payload;
+    payload << "{";
+    payload << "\"model\":\"" << json_escape(settings.model) << "\",";
+    payload << "\"temperature\":" << settings.temperature << ",";
+    payload << "\"messages\":[";
+    payload << "{\"role\":\"system\",\"content\":\"" << json_escape(system_prompt) << "\"},";
+    payload << "{\"role\":\"user\",\"content\":\"" << json_escape(question) << "\"}";
+    payload << "]}";
+
+    fs::path tmp_payload = fs::temp_directory_path() / ("llm_payload_" + random_hex_id(12) + ".json");
+    write_text_file(tmp_payload, payload.str());
+
+    std::string base = settings.base_url;
+    while (!base.empty() && base.back() == '/') base.pop_back();
+    std::string url = base + "/chat/completions";
+
+    std::string cmd = "curl -sS -X POST " + shell_escape(url) +
+                      " -H " + shell_escape("Content-Type: application/json") +
+                      " -H " + shell_escape("Authorization: Bearer " + settings.api_key) +
+                      " --data-binary @" + shell_escape(tmp_payload.string()) + " 2>&1";
+
+    CommandResult res;
+    try {
+        res = run_command_capture(cmd);
+        fs::remove(tmp_payload);
+    } catch (...) {
+        std::error_code ec;
+        fs::remove(tmp_payload, ec);
+        throw;
+    }
+
+    if (res.exit_code != 0) {
+        throw std::runtime_error("模型请求失败: " + trim_copy(res.output));
+    }
+
+    auto data = crow::json::load(res.output);
+    if (!data || !data.has("choices") || data["choices"].t() != crow::json::type::List || data["choices"].size() == 0) {
+        throw std::runtime_error("模型响应格式错误: " + trim_copy(res.output));
+    }
+
+    auto msg = data["choices"][0]["message"];
+    if (!msg || !msg.has("content")) {
+        throw std::runtime_error("模型响应缺少 content");
+    }
+
+    auto content = msg["content"];
+    if (content.t() == crow::json::type::String) {
+        return trim_copy(content.s());
+    }
+
+    if (content.t() == crow::json::type::List) {
+        std::ostringstream joined;
+        for (std::size_t i = 0; i < content.size(); ++i) {
+            auto part = content[i];
+            if (part.t() == crow::json::type::String) {
+                joined << part.s();
+                continue;
+            }
+            if (part.t() == crow::json::type::Object && part.has("text") && part["text"].t() == crow::json::type::String) {
+                joined << part["text"].s();
+            }
+        }
+        return trim_copy(joined.str());
+    }
+
+    throw std::runtime_error("模型响应 content 类型不受支持");
+}
+
 inline void register_info_routes(crow::SimpleApp &app, InfoStore &store, const std::string &onnx_path) {
+    fs::create_directories(rag_db_dir(store));
+    if (!fs::exists(llm_settings_path(store))) {
+        save_llm_settings(store, default_llm_settings());
+    }
+
+    CROW_ROUTE(app, "/api/llm/settings").methods(crow::HTTPMethod::GET)([&store]() {
+        try {
+            auto cfg = load_llm_settings(store);
+            crow::json::wvalue res;
+            res["base_url"] = cfg.base_url;
+            res["api_key"] = cfg.api_key;
+            res["model"] = cfg.model;
+            res["temperature"] = cfg.temperature;
+            res["top_k"] = cfg.top_k;
+            res["system_prompt"] = cfg.system_prompt;
+            crow::response r{res};
+            r.code = 200;
+            set_json_headers(r);
+            return r;
+        } catch (const std::exception &e) {
+            crow::response r{std::string("{\"error\":\"") + e.what() + "\"}"};
+            r.code = 400;
+            set_json_headers(r);
+            return r;
+        }
+    });
+
+    CROW_ROUTE(app, "/api/llm/settings").methods(crow::HTTPMethod::POST)([&store](const crow::request &req) {
+        try {
+            auto body = crow::json::load(req.body);
+            if (!body) throw std::runtime_error("invalid json");
+
+            auto cfg = load_llm_settings(store);
+            if (body.has("base_url") && body["base_url"].t() == crow::json::type::String) cfg.base_url = body["base_url"].s();
+            if (body.has("api_key") && body["api_key"].t() == crow::json::type::String) cfg.api_key = body["api_key"].s();
+            if (body.has("model") && body["model"].t() == crow::json::type::String) cfg.model = body["model"].s();
+            if (body.has("system_prompt") && body["system_prompt"].t() == crow::json::type::String) cfg.system_prompt = body["system_prompt"].s();
+            if (body.has("temperature") && body["temperature"].t() == crow::json::type::Number) cfg.temperature = body["temperature"].d();
+            if (body.has("top_k") && body["top_k"].t() == crow::json::type::Number) cfg.top_k = static_cast<int>(body["top_k"].i());
+
+            if (cfg.temperature < 0.0) cfg.temperature = 0.0;
+            if (cfg.temperature > 2.0) cfg.temperature = 2.0;
+            if (cfg.top_k < 1) cfg.top_k = 1;
+            if (cfg.top_k > 10) cfg.top_k = 10;
+
+            save_llm_settings(store, cfg);
+            crow::response r{"{\"status\":\"ok\"}"};
+            r.code = 200;
+            set_json_headers(r);
+            return r;
+        } catch (const std::exception &e) {
+            crow::response r{std::string("{\"error\":\"") + e.what() + "\"}"};
+            r.code = 400;
+            set_json_headers(r);
+            return r;
+        }
+    });
+
+    CROW_ROUTE(app, "/api/llm/rag/upload").methods(crow::HTTPMethod::POST)([&store](const crow::request &req) {
+        try {
+            fs::path dir = rag_db_dir(store);
+            fs::create_directories(dir);
+
+            std::string content_type = req.get_header_value("Content-Type");
+            crow::json::wvalue uploaded;
+            uploaded = crow::json::wvalue::list();
+
+            int saved = 0;
+            if (content_type.find("multipart/form-data") != std::string::npos) {
+                crow::multipart::message msg(req);
+                for (auto &part : msg.parts) {
+                    std::string filename;
+                    const auto &cd = part.get_header_object("Content-Disposition");
+                    auto it = cd.params.find("filename");
+                    if (it != cd.params.end()) filename = it->second;
+                    filename = sanitize_filename(filename);
+                    if (filename.empty()) filename = "document.txt";
+
+                    fs::path out = dir / (random_hex_id() + "__" + filename);
+                    write_text_file(out, part.body);
+                    uploaded[saved] = filename;
+                    ++saved;
+                }
+            } else {
+                std::string filename = sanitize_filename(req.get_header_value("X-Filename"));
+                if (filename.empty()) filename = "document.txt";
+                fs::path out = dir / (random_hex_id() + "__" + filename);
+                write_text_file(out, req.body);
+                uploaded[0] = filename;
+                saved = 1;
+            }
+
+            crow::json::wvalue res;
+            res["saved"] = saved;
+            res["uploaded"] = std::move(uploaded);
+            crow::response r{res};
+            r.code = 200;
+            set_json_headers(r);
+            return r;
+        } catch (const std::exception &e) {
+            crow::response r{std::string("{\"error\":\"") + e.what() + "\"}"};
+            r.code = 400;
+            set_json_headers(r);
+            return r;
+        }
+    });
+
+    CROW_ROUTE(app, "/api/llm/rag/documents").methods(crow::HTTPMethod::GET)([&store]() {
+        try {
+            auto files = list_rag_docs(store);
+            crow::json::wvalue docs;
+            docs = crow::json::wvalue::list();
+            for (std::size_t i = 0; i < files.size(); ++i) {
+                crow::json::wvalue item;
+                item["name"] = original_name_from_rag_file(files[i]);
+                item["size"] = static_cast<uint64_t>(fs::file_size(files[i]));
+                docs[static_cast<unsigned int>(i)] = std::move(item);
+            }
+            crow::json::wvalue res;
+            res["documents"] = std::move(docs);
+            res["count"] = static_cast<int>(files.size());
+            crow::response r{res};
+            r.code = 200;
+            set_json_headers(r);
+            return r;
+        } catch (const std::exception &e) {
+            crow::response r{std::string("{\"error\":\"") + e.what() + "\"}"};
+            r.code = 400;
+            set_json_headers(r);
+            return r;
+        }
+    });
+
+    CROW_ROUTE(app, "/api/llm/rag/download").methods(crow::HTTPMethod::GET)([&store]() {
+        try {
+            fs::path dir = rag_db_dir(store);
+            auto zip_path = create_zip_store(dir, "llm_rag_documents.zip");
+            crow::response r{read_text_file(zip_path)};
+            r.set_header("Content-Type", "application/zip");
+            r.set_header("Content-Disposition", "attachment; filename=\"llm_rag_documents.zip\"");
+            r.set_header("Access-Control-Allow-Origin", "*");
+            return r;
+        } catch (const std::exception &e) {
+            crow::response r{std::string("{\"error\":\"") + e.what() + "\"}"};
+            r.code = 400;
+            set_json_headers(r);
+            return r;
+        }
+    });
+
+    CROW_ROUTE(app, "/api/llm/chat").methods(crow::HTTPMethod::POST)([&store](const crow::request &req) {
+        try {
+            auto body = crow::json::load(req.body);
+            if (!body) throw std::runtime_error("invalid json");
+            if (!body.has("question") || body["question"].t() != crow::json::type::String) {
+                throw std::runtime_error("missing question");
+            }
+
+            std::string question = trim_copy(body["question"].s());
+            if (question.empty()) throw std::runtime_error("question 不能为空");
+
+            auto cfg = load_llm_settings(store);
+            if (body.has("top_k") && body["top_k"].t() == crow::json::type::Number) {
+                cfg.top_k = static_cast<int>(body["top_k"].i());
+            }
+            if (body.has("temperature") && body["temperature"].t() == crow::json::type::Number) {
+                cfg.temperature = body["temperature"].d();
+            }
+            if (body.has("system_prompt") && body["system_prompt"].t() == crow::json::type::String) {
+                cfg.system_prompt = body["system_prompt"].s();
+            }
+            if (cfg.top_k < 1) cfg.top_k = 1;
+            if (cfg.top_k > 10) cfg.top_k = 10;
+
+            auto files = list_rag_docs(store);
+            std::vector<std::string> docs;
+            for (const auto &p : files) {
+                try {
+                    std::string text = extract_text_for_rag(p);
+                    if (!text.empty()) docs.push_back(std::move(text));
+                } catch (...) {
+                    continue;
+                }
+            }
+
+            RagIndex index;
+            int chunks = index.index_documents(docs);
+            auto contexts = index.retrieve(question, cfg.top_k);
+            std::string answer = llm_chat_completion(cfg, question, contexts);
+
+            crow::json::wvalue context_arr;
+            context_arr = crow::json::wvalue::list();
+            for (std::size_t i = 0; i < contexts.size(); ++i) {
+                context_arr[static_cast<unsigned int>(i)] = contexts[i];
+            }
+
+            crow::json::wvalue res;
+            res["answer"] = answer;
+            res["chunks"] = chunks;
+            res["contexts"] = std::move(context_arr);
+            crow::response r{res};
+            r.code = 200;
+            set_json_headers(r);
+            return r;
+        } catch (const std::exception &e) {
+            crow::response r{std::string("{\"error\":\"") + e.what() + "\"}"};
+            r.code = 400;
+            set_json_headers(r);
+            return r;
+        }
+    });
+
     // 列表
     CROW_ROUTE(app, "/api/projects/info.json").methods(crow::HTTPMethod::GET)([&store]() {
         try {
@@ -2240,6 +2925,51 @@ inline void register_info_routes(crow::SimpleApp &app, InfoStore &store, const s
     });
 
     // CORS 预检（OPTIONS）
+    CROW_ROUTE(app, "/api/llm/settings").methods(crow::HTTPMethod::OPTIONS)([](){
+        crow::response r;
+        r.set_header("Access-Control-Allow-Origin", "*");
+        r.set_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+        r.set_header("Access-Control-Allow-Headers", "Content-Type");
+        r.code = 204;
+        return r;
+    });
+
+    CROW_ROUTE(app, "/api/llm/rag/upload").methods(crow::HTTPMethod::OPTIONS)([](){
+        crow::response r;
+        r.set_header("Access-Control-Allow-Origin", "*");
+        r.set_header("Access-Control-Allow-Methods", "POST, OPTIONS");
+        r.set_header("Access-Control-Allow-Headers", "Content-Type, X-Filename");
+        r.code = 204;
+        return r;
+    });
+
+    CROW_ROUTE(app, "/api/llm/rag/documents").methods(crow::HTTPMethod::OPTIONS)([](){
+        crow::response r;
+        r.set_header("Access-Control-Allow-Origin", "*");
+        r.set_header("Access-Control-Allow-Methods", "GET, OPTIONS");
+        r.set_header("Access-Control-Allow-Headers", "Content-Type");
+        r.code = 204;
+        return r;
+    });
+
+    CROW_ROUTE(app, "/api/llm/rag/download").methods(crow::HTTPMethod::OPTIONS)([](){
+        crow::response r;
+        r.set_header("Access-Control-Allow-Origin", "*");
+        r.set_header("Access-Control-Allow-Methods", "GET, OPTIONS");
+        r.set_header("Access-Control-Allow-Headers", "Content-Type");
+        r.code = 204;
+        return r;
+    });
+
+    CROW_ROUTE(app, "/api/llm/chat").methods(crow::HTTPMethod::OPTIONS)([](){
+        crow::response r;
+        r.set_header("Access-Control-Allow-Origin", "*");
+        r.set_header("Access-Control-Allow-Methods", "POST, OPTIONS");
+        r.set_header("Access-Control-Allow-Headers", "Content-Type");
+        r.code = 204;
+        return r;
+    });
+
     CROW_ROUTE(app, "/api/projects/<string>").methods(crow::HTTPMethod::OPTIONS)([](const std::string &){
         crow::response r;
         r.set_header("Access-Control-Allow-Origin", "*");

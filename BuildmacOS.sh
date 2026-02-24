@@ -63,3 +63,23 @@ $CXX $CXXFLAGS main.cpp cnpy/cnpy.cpp -o main ${OPENCV_LIBS} ${ONNX_LIBS} -lz
 echo "哈基米南北绿豆!!!!!!!!"
 echo "Build complete: ./main"
 echo "Run: ./main"
+
+echo ""
+echo "Runtime checks for LLM/RAG:"
+if command -v curl >/dev/null 2>&1; then
+  echo "  - curl: OK"
+else
+  echo "  - curl: MISSING (LLM chat API /api/llm/chat 需要)"
+fi
+
+if command -v zip >/dev/null 2>&1; then
+  echo "  - zip: OK"
+else
+  echo "  - zip: MISSING (下载接口会用到zip)"
+fi
+
+if command -v pdftotext >/dev/null 2>&1; then
+  echo "  - pdftotext: OK (支持PDF RAG解析)"
+else
+  echo "  - pdftotext: OPTIONAL (如需PDF RAG可执行: brew install poppler)"
+fi

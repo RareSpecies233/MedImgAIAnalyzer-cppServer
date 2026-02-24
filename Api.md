@@ -167,6 +167,38 @@
 - 方法：GET /api/project/{uuid}/download/OG3d
 - 返回：GLB（二进制，model.glb）
 
+20) 获取 LLM 配置
+- 方法：GET /api/llm/settings
+- 返回：200，`{ "base_url": "...", "api_key": "...", "model": "...", "temperature": 0.2, "top_k": 4, "system_prompt": "..." }`
+
+21) 保存/更新 LLM 配置
+- 方法：POST /api/llm/settings
+- 请求体：可包含 `base_url`、`api_key`、`model`、`temperature`、`top_k`、`system_prompt`
+- 说明：配置会保存到 `db/llm.json`
+- 返回：200，`{ "status": "ok" }`
+
+22) 上传 RAG 文档
+- 方法：POST /api/llm/rag/upload
+- 支持：`multipart/form-data` 或直接二进制（`X-Filename`）
+- 说明：文档保存到 `db/llmdb/`
+- 返回：200，`{ "saved": <count>, "uploaded": ["name1", "name2"] }`
+
+23) 获取 RAG 文档列表
+- 方法：GET /api/llm/rag/documents
+- 返回：200，`{ "documents": [{"name":"...","size":123}], "count": 1 }`
+
+24) 下载 RAG 文档
+- 方法：GET /api/llm/rag/download
+- 返回：ZIP（二进制，`llm_rag_documents.zip`）
+
+25) RAG + 大模型问答
+- 方法：POST /api/llm/chat
+- 请求体：`{ "question": "...", "top_k": 4, "temperature": 0.2, "system_prompt": "..." }`
+- 说明：
+	- 默认使用 `db/llm.json` 中的 `base_url`、`api_key`、`model`
+	- 会自动检索 `db/llmdb/` 文档并注入上下文
+- 返回：200，`{ "answer": "...", "chunks": 12, "contexts": ["..."] }`
+
 ## 请求/响应头
 - 请求：POST/PATCH 请使用 `Content-Type: application/json`
 - 响应：`Content-Type: application/json`
@@ -175,6 +207,8 @@
 ## 磁盘存储布局
 - `db/info.json` — 单一 JSON 数组文件，包含所有项目对象（首次运行时自动创建）。
 - `db/{uuid}/project.json` — 项目创建时生成，记录项目处理相关状态。
+- `db/llm.json` — 大模型配置（`base_url`、`api_key`、`model`、`temperature`、`top_k`、`system_prompt`）。
+- `db/llmdb/` — RAG 文档目录（上传的文本/PDF等文档持久化存储）。
 
 ## 本地快速上手
 - 构建：在项目根目录运行 `./BuildmacOS.sh`

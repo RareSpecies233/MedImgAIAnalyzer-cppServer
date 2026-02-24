@@ -37,8 +37,22 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 )
 
 # Crow requires standalone Asio headers
-find_package(asio CONFIG REQUIRED)
-target_link_libraries(${PROJECT_NAME} PRIVATE asio::asio)
+find_package(asio CONFIG QUIET)
+if(asio_FOUND)
+  target_link_libraries(${PROJECT_NAME} PRIVATE asio::asio)
+else()
+  find_path(ASIO_INCLUDE_DIR asio.hpp
+    PATHS
+      /opt/homebrew/include
+      /usr/local/include
+  )
+  if(ASIO_INCLUDE_DIR)
+    message(STATUS "Found Asio headers: ${ASIO_INCLUDE_DIR}")
+    target_include_directories(${PROJECT_NAME} PRIVATE ${ASIO_INCLUDE_DIR})
+  else()
+    message(FATAL_ERROR "Asio not found. Please install Asio headers (brew install asio) or provide asioConfig.cmake.")
+  endif()
+endif()
 
 # Compiler warnings and sane defaults
 if(MSVC)
