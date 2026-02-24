@@ -22,7 +22,9 @@
 #include <regex>
 #include <cstdio>
 #include <optional>
+#ifndef _WIN32
 #include <sys/wait.h>
+#endif
 #include <onnxruntime/onnxruntime_cxx_api.h>
 #include "cnpy.h"
 #include "info_store.h"
