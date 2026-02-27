@@ -7,7 +7,11 @@
 
 int main(int argc, char **argv)
 {
-    std::cout << "数据库软件运行后请勿手动修改数据库" << std::endl;
+    std::cout << "======================================" << std::endl;
+    std::cout << "| 数据库软件运行后请勿手动修改数据库 |" << std::endl;
+    std::cout << "|------------------------------------|" << std::endl;
+    std::cout << "|            CPU推理版本             |" << std::endl;
+    std::cout << "======================================" << std::endl;
     std::string onnx_path;
     int infer_threads = static_cast<int>(std::thread::hardware_concurrency());
     if (infer_threads <= 0) infer_threads = 1;
