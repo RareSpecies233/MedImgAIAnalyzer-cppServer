@@ -35,6 +35,7 @@
 #include "cnpy.h"
 #include "info_store.h"
 #include "npz_to_glb.h"
+#include "runtime_logger.h"
 
 #ifdef _WIN32
 #ifdef DELETE
@@ -100,19 +101,23 @@ static std::optional<int> extract_int_field(const std::string &body, const std::
 
 static inline std::string read_text_file(const fs::path &path)
 {
+    RuntimeLogger::debug("读取文件开始: " + path.string());
     std::ifstream ifs(path, std::ios::binary);
     if (!ifs) throw std::runtime_error("无法读取文件");
     std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+    RuntimeLogger::debug("读取文件完成: " + path.string() + ", bytes=" + std::to_string(content.size()));
     return content;
 }
 
 static inline void write_text_file(const fs::path &path, const std::string &content)
 {
+    RuntimeLogger::debug("写入文件开始: " + path.string() + ", bytes=" + std::to_string(content.size()));
     std::ofstream ofs(path, std::ios::binary | std::ios::trunc);
     if (!ofs) throw std::runtime_error("无法写入文件");
     ofs << content;
     ofs.flush();
     if (!ofs) throw std::runtime_error("写入文件失败");
+    RuntimeLogger::debug("写入文件完成: " + path.string());
 }
 
 static inline std::string to_lower_copy(const std::string &s)
@@ -914,24 +919,29 @@ static inline void npz_to_png(const fs::path &input_path, const fs::path &out_pa
 
 static inline void all2npz(const fs::path &src, const fs::path &dst)
 {
+    RuntimeLogger::info("文件转换开始 all2npz: src=" + src.string() + " -> dst=" + dst.string());
     std::error_code ec;
     fs::create_directories(dst.parent_path(), ec);
     const std::string ext = to_lower_copy(src.extension().string());
     if (ext == ".npz") {
         fs::copy_file(src, dst, fs::copy_options::overwrite_existing, ec);
         if (ec) throw std::runtime_error("npz 复制失败: " + ec.message());
+        RuntimeLogger::info("文件转换完成 all2npz(复制): " + dst.string());
         return;
     }
     if (ext == ".dcm") {
         dcm_to_npz(src, dst);
+        RuntimeLogger::info("文件转换完成 dcm->npz: " + dst.string());
         return;
     }
     if (ext == ".nii" || ext == ".gz" || ext == ".nii.gz") {
         nii_to_npz(src, dst, -1);
+        RuntimeLogger::info("文件转换完成 nii->npz: " + dst.string());
         return;
     }
     if (ext == ".png") {
         png_to_npz(src, dst);
+        RuntimeLogger::info("文件转换完成 png->npz: " + dst.string());
         return;
     }
     throw std::runtime_error("不支持转换为npz的文件类型: " + src.extension().string());
@@ -939,23 +949,29 @@ static inline void all2npz(const fs::path &src, const fs::path &dst)
 
 static inline void all2png(const fs::path &src, const fs::path &dst)
 {
+    RuntimeLogger::info("文件转换开始 all2png: src=" + src.string() + " -> dst=" + dst.string());
     std::error_code ec;
     fs::create_directories(dst.parent_path(), ec);
     const std::string ext = to_lower_copy(src.extension().string());
     if (ext == ".png") {
         fs::copy_file(src, dst, fs::copy_options::overwrite_existing, ec);
         if (ec) throw std::runtime_error("png 复制失败: " + ec.message());
+        RuntimeLogger::info("文件转换完成 all2png(复制): " + dst.string());
         return;
     }
     if (ext == ".npz") {
         npz_to_png(src, dst, "image");
+        RuntimeLogger::info("文件转换完成 npz->png: " + dst.string());
         return;
     }
     if (ext == ".dcm" || ext == ".nii" || ext == ".gz" || ext == ".nii.gz") {
         fs::path tmp_npz = dst.parent_path() / (src.stem().string() + ".__tmp_convert__.npz");
+        RuntimeLogger::debug("创建临时转换文件: " + tmp_npz.string());
         all2npz(src, tmp_npz);
         npz_to_png(tmp_npz, dst, "image");
         fs::remove(tmp_npz, ec);
+        RuntimeLogger::debug("清理临时转换文件: " + tmp_npz.string());
+        RuntimeLogger::info("文件转换完成 复合流程->png: " + dst.string());
         return;
     }
     throw std::runtime_error("不支持转换为png的文件类型: " + src.extension().string());
@@ -968,6 +984,10 @@ static inline void convert_npz_to_pngs(const fs::path &npz_path,
                                        bool write_raw_png = true,
                                        const std::string &marked_suffix = "_marked")
 {
+    RuntimeLogger::info("NPZ 转 PNG 流程开始: npz=" + npz_path.string() +
+                        ", png_dir=" + png_dir.string() +
+                        ", marked_dir=" + marked_dir.string() +
+                        ", marked=" + (marked ? std::string("true") : std::string("false")));
     static const std::vector<std::string> kRawKeys = {
         "image", "img", "raw", "ct", "data", "slice", "input"
     };
@@ -1001,6 +1021,7 @@ static inline void convert_npz_to_pngs(const fs::path &npz_path,
         fs::create_directories(png_dir);
         fs::path out_png = png_dir / (npz_path.stem().string() + ".png");
         if (!cv::imwrite(out_png.string(), raw_u8)) throw std::runtime_error("写入png失败");
+        RuntimeLogger::info("输出原始 PNG: " + out_png.string());
     }
 
     if (marked) {
@@ -1033,7 +1054,10 @@ static inline void convert_npz_to_pngs(const fs::path &npz_path,
         }
         fs::path out_marked = marked_dir / (npz_path.stem().string() + marked_suffix + ".png");
         if (!cv::imwrite(out_marked.string(), rgba)) throw std::runtime_error("写入markedpng失败");
+        RuntimeLogger::info("输出标注 PNG: " + out_marked.string());
     }
+
+    RuntimeLogger::info("NPZ 转 PNG 流程完成: " + npz_path.string());
 }
 
 static inline bool is_valid_crop(int xL, int xR, int yL, int yR, int width, int height)
@@ -2460,9 +2484,12 @@ static inline std::string llm_chat_completion(const LlmSettings &settings,
     throw std::runtime_error("模型响应 content 类型不受支持");
 }
 
-inline void register_info_routes(crow::SimpleApp &app, InfoStore &store, const std::string &onnx_path, int infer_threads) {
+template <typename App>
+inline void register_info_routes(App &app, InfoStore &store, const std::string &onnx_path, int infer_threads) {
+    RuntimeLogger::info("register_info_routes 开始执行");
     fs::create_directories(rag_db_dir(store));
     if (!fs::exists(llm_settings_path(store))) {
+        RuntimeLogger::info("LLM 配置不存在，写入默认配置");
         save_llm_settings(store, default_llm_settings());
     }
 

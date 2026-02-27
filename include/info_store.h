@@ -11,6 +11,7 @@
 
 #include "uuid_utils.h"
 #include "time_utils.h"
+#include "runtime_logger.h"
 
 namespace fs = std::filesystem;
 
@@ -106,21 +107,26 @@ struct InfoStore {
 
     void init(const std::string &base)
     {
+        RuntimeLogger::info("InfoStore::init 开始，base=" + base);
         base_path = fs::path(base);
         if (!fs::exists(base_path)) {
+            RuntimeLogger::info("创建数据库目录: " + base_path.string());
             fs::create_directories(base_path);
         }
         file_path = base_path / "info.json";
         if (!fs::exists(file_path)) {
             // 创建空数组
+            RuntimeLogger::info("初始化 info.json: " + file_path.string());
             write_raw("[]");
         }
         load();
+        RuntimeLogger::info("InfoStore::init 完成，项目数量=" + std::to_string(index.size()));
     }
 
     void load()
     {
         std::lock_guard<std::mutex> lk(mtx);
+        RuntimeLogger::debug("InfoStore::load 开始: " + file_path.string());
         std::ifstream ifs(file_path);
         if (!ifs) throw std::runtime_error("无法打开 info.json 以读取");
         std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
@@ -148,6 +154,7 @@ struct InfoStore {
                 index[maybe->uuid] = *maybe;
             }
         }
+        RuntimeLogger::debug("InfoStore::load 完成，索引数量=" + std::to_string(index.size()));
     }
 
     std::vector<Project> list_sorted()
@@ -183,16 +190,19 @@ struct InfoStore {
             if (index.find(uuid) == index.end()) throw std::runtime_error("未找到项目");
         }
         fs::path path = base_path / uuid / "project.json";
+        RuntimeLogger::debug("读取 project.json: uuid=" + uuid + ", path=" + path.string());
         std::ifstream ifs(path, std::ios::binary);
         if (!ifs) throw std::runtime_error("project.json not found");
         std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
         if (content.empty()) return std::string("{}");
+        RuntimeLogger::debug("读取 project.json 完成: uuid=" + uuid + ", bytes=" + std::to_string(content.size()));
         return content;
     }
 
     Project create(const std::string &name, const std::string &note)
     {
         if (name.empty()) throw std::runtime_error("name 不能为空");
+        RuntimeLogger::info("创建项目开始: name=" + name);
         Project p;
         p.uuid = generate_uuid_v4();
         p.name = name;
@@ -211,23 +221,27 @@ struct InfoStore {
             index[p.uuid] = p;
             persist_locked();
         }
+        RuntimeLogger::info("创建项目完成: uuid=" + p.uuid + ", name=" + p.name);
         return p;
     }
 
     Project patch(const std::string &uuid, const std::optional<std::string> &note)
     {
         std::lock_guard<std::mutex> lk(mtx);
+        RuntimeLogger::info("更新项目开始: uuid=" + uuid);
         auto it = index.find(uuid);
         if (it == index.end()) throw std::runtime_error("未找到项目");
         if (note) it->second.note = *note;
         it->second.updatedAt = now_iso8601_utc();
         persist_locked();
+        RuntimeLogger::info("更新项目完成: uuid=" + uuid);
         return it->second;
     }
 
     bool remove(const std::string &uuid)
     {
         std::lock_guard<std::mutex> lk(mtx);
+        RuntimeLogger::info("删除项目开始: uuid=" + uuid);
         auto it = index.find(uuid);
         if (it == index.end()) return false;
         index.erase(it);
@@ -238,6 +252,7 @@ struct InfoStore {
         if (ec) {
             throw std::runtime_error(std::string("删除项目目录失败: ") + ec.message());
         }
+        RuntimeLogger::info("删除项目完成: uuid=" + uuid);
         return true;
     }
 
@@ -263,6 +278,7 @@ private:
 
     void write_project_json(const fs::path &path, const std::string &uuid)
     {
+        RuntimeLogger::debug("写入 project.json 开始: " + path.string() + ", uuid=" + uuid);
         std::string s;
         s += "{\n";
         s += "  \"uuid\": \"" + escape_json_string(uuid) + "\",\n";
@@ -286,11 +302,13 @@ private:
         ofs << s;
         ofs.flush();
         if (!ofs) throw std::runtime_error("写入 project.json 失败");
+        RuntimeLogger::debug("写入 project.json 完成: " + path.string());
     }
 
     void persist_locked()
     {
         // 调用者必须持有 mtx 锁
+        RuntimeLogger::debug("InfoStore::persist_locked 开始，项目数量=" + std::to_string(index.size()));
         std::string out = "[";
         bool first = true;
         for (auto &p : index) {
@@ -300,11 +318,13 @@ private:
         }
         out += "]";
         write_raw(out);
+        RuntimeLogger::debug("InfoStore::persist_locked 完成");
     }
 
     void write_raw(const std::string &s)
     {
         // 原子性写入：先写入临时文件再重命名
+        RuntimeLogger::debug("写入 info.json 开始: " + file_path.string() + ", bytes=" + std::to_string(s.size()));
         fs::path tmp = file_path;
         tmp += ".tmp";
         {
@@ -317,5 +337,6 @@ private:
         std::error_code ec;
         fs::rename(tmp, file_path, ec);
         if (ec) throw std::runtime_error(std::string("重命名失败: ") + ec.message());
+        RuntimeLogger::debug("写入 info.json 完成: " + file_path.string());
     }
 };
