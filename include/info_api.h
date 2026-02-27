@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <cstring>
 #include <random>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <regex>
@@ -1144,7 +1145,8 @@ static inline std::vector<float> make_input_tensor_chw(const std::vector<double>
 static inline std::vector<int64_t> run_onnx_inference_mask(const fs::path &onnx_path,
                                                            const cnpy::NpyArray &raw_arr,
                                                            int img_size,
-                                                           int out_size)
+                                                           int out_size,
+                                                           int infer_threads)
 {
     int height = 0;
     int width = 0;
@@ -1155,7 +1157,16 @@ static inline std::vector<int64_t> run_onnx_inference_mask(const fs::path &onnx_
 
     Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "medimg_infer");
     Ort::SessionOptions opts;
-    opts.SetIntraOpNumThreads(1);
+    int cpu_threads = infer_threads;
+    if (cpu_threads <= 0) {
+        cpu_threads = static_cast<int>(std::thread::hardware_concurrency());
+    }
+    if (cpu_threads <= 0) cpu_threads = 1;
+    opts.SetIntraOpNumThreads(cpu_threads);
+    opts.SetInterOpNumThreads(std::max(1, cpu_threads / 2));
+    if (cpu_threads > 1) {
+        opts.SetExecutionMode(ExecutionMode::ORT_PARALLEL);
+    }
     opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_EXTENDED);
 #ifdef _WIN32
     auto onnx_path_w = onnx_path.wstring();
@@ -2449,7 +2460,7 @@ static inline std::string llm_chat_completion(const LlmSettings &settings,
     throw std::runtime_error("模型响应 content 类型不受支持");
 }
 
-inline void register_info_routes(crow::SimpleApp &app, InfoStore &store, const std::string &onnx_path) {
+inline void register_info_routes(crow::SimpleApp &app, InfoStore &store, const std::string &onnx_path, int infer_threads) {
     fs::create_directories(rag_db_dir(store));
     if (!fs::exists(llm_settings_path(store))) {
         save_llm_settings(store, default_llm_settings());
@@ -2938,7 +2949,7 @@ inline void register_info_routes(crow::SimpleApp &app, InfoStore &store, const s
     });
 
     // 开始推理（处理 npz）
-    CROW_ROUTE(app, "/api/project/<string>/start_analysis").methods(crow::HTTPMethod::POST)([&store, onnx_path](const crow::request &req, const std::string &uuid){
+    CROW_ROUTE(app, "/api/project/<string>/start_analysis").methods(crow::HTTPMethod::POST)([&store, onnx_path, infer_threads](const crow::request &req, const std::string &uuid){
         try {
             if (!store.exists(uuid)) throw std::runtime_error("project not found");
             if (onnx_path.empty()) {
@@ -2995,7 +3006,7 @@ inline void register_info_routes(crow::SimpleApp &app, InfoStore &store, const s
                     throw std::runtime_error("npz中未找到2D原始图像");
                 }
 
-                std::vector<int64_t> pred = run_onnx_inference_mask(onnx_path, *raw_arr, img_size, out_size);
+                std::vector<int64_t> pred = run_onnx_inference_mask(onnx_path, *raw_arr, img_size, out_size, infer_threads);
 
                 bool has_crop = (mode_val == "semi") && is_valid_crop(semi_xL, semi_xR, semi_yL, semi_yR, out_size, out_size);
                 int crop_xL = has_crop ? semi_xL : -1;
