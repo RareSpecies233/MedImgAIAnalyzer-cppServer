@@ -4,9 +4,9 @@
 
 [ 已修复 ]  [cpp-5d88681] [cpp] 能否将推理作为cpu多线程的？
 [ 已修复 ]  [cpp-50619f7] [cpp/windows] windows平台无法打包zip
+[ 已修复 ]  [vue3/cpp] Ai处理时会同时导出dcm/nii
+[ 已修复 ]  [vue3/cpp] 下载时貌似每次都会再走一次转换流程
 
-[正在修复]  [vue3/cpp] Ai处理时会同时导出dcm/nii
-[正在修复]  [vue3/cpp] 下载时貌似每次都会再走一次转换流程
 
 [等待修复]  [macOS/vue3] macOS下推理成功时仍提示失败（目前已做ui上的优化）
 [等待修复]  [cpp] RAG目前是随用随解析，需要改为上传时解析

@@ -1205,8 +1205,8 @@ static inline std::vector<int64_t> run_onnx_inference_mask(const fs::path &onnx_
         cpu_threads = static_cast<int>(std::thread::hardware_concurrency());
     }
     if (cpu_threads <= 0) cpu_threads = 1;
-    RuntimeLogger::debug("[推理] ONNX线程配置: intra=" + std::to_string(cpu_threads) +
-                         ", inter=" + std::to_string(std::max(1, cpu_threads / 2)));
+    RuntimeLogger::info("[推理] ONNX线程配置: intra=" + std::to_string(cpu_threads) +
+                        ", inter=" + std::to_string(std::max(1, cpu_threads / 2)));
     opts.SetIntraOpNumThreads(cpu_threads);
     opts.SetInterOpNumThreads(std::max(1, cpu_threads / 2));
     if (cpu_threads > 1) {
@@ -1538,6 +1538,8 @@ static inline std::string powershell_single_quote_escape(const std::string &s)
     return out;
 }
 
+static inline bool command_exists(const std::string &cmd);
+
 static inline fs::path create_zip_store(const fs::path &dir, const std::string &zip_name)
 {
     if (!fs::exists(dir)) throw std::runtime_error("目录不存在");
@@ -1546,21 +1548,42 @@ static inline fs::path create_zip_store(const fs::path &dir, const std::string &
     RuntimeLogger::info("[目录转zip] 开始: " + dir.string() + " -> " + tmp.string());
 
     int rc = 0;
+    bool used_multicore = false;
 #ifdef _WIN32
-    std::string src_glob = powershell_single_quote_escape((dir / "*").string());
-    std::string dst_zip = powershell_single_quote_escape(tmp.string());
-    std::string cmd =
-        "powershell -NoProfile -NonInteractive -Command \"Compress-Archive -Path '" +
-        src_glob +
-        "' -DestinationPath '" +
-        dst_zip +
-        "' -CompressionLevel Optimal -Force\"";
-    rc = std::system(cmd.c_str());
+    if (command_exists("7z")) {
+        std::string src_glob = powershell_single_quote_escape((dir / "*").string());
+        std::string dst_zip = powershell_single_quote_escape(tmp.string());
+        std::string cmd =
+            "powershell -NoProfile -NonInteractive -Command \""
+            "$ErrorActionPreference='Stop'; "
+            "$d='" + powershell_single_quote_escape(dir.string()) + "'; "
+            "$z='" + dst_zip + "'; "
+            "Set-Location -LiteralPath $d; "
+            "& 7z a -tzip -mx=5 -mmt=on -y $z * | Out-Null\"";
+        rc = std::system(cmd.c_str());
+        used_multicore = true;
+    } else {
+        std::string src_glob = powershell_single_quote_escape((dir / "*").string());
+        std::string dst_zip = powershell_single_quote_escape(tmp.string());
+        std::string cmd =
+            "powershell -NoProfile -NonInteractive -Command \"Compress-Archive -Path '" +
+            src_glob +
+            "' -DestinationPath '" +
+            dst_zip +
+            "' -CompressionLevel Optimal -Force\"";
+        rc = std::system(cmd.c_str());
+    }
 #else
-    std::string cmd = "zip -r " + shell_escape(tmp.string()) + " .";
     auto cwd = fs::current_path();
     fs::current_path(dir);
     try {
+        std::string cmd;
+        if (command_exists("7z")) {
+            cmd = "7z a -tzip -mx=5 -mmt=on -y " + shell_escape(tmp.string()) + " . >/dev/null";
+            used_multicore = true;
+        } else {
+            cmd = "zip -5 -r " + shell_escape(tmp.string()) + " . >/dev/null";
+        }
         rc = std::system(cmd.c_str());
         fs::current_path(cwd);
     } catch (...) {
@@ -1570,6 +1593,7 @@ static inline fs::path create_zip_store(const fs::path &dir, const std::string &
 #endif
 
     if (rc != 0 || !fs::exists(tmp)) throw std::runtime_error("zip 失败");
+    RuntimeLogger::info(std::string("[目录转zip] 压缩参数: level=5, multicore=") + (used_multicore ? "on" : "off"));
     RuntimeLogger::info("[目录转zip] 完成: " + tmp.string());
     return tmp;
 }
