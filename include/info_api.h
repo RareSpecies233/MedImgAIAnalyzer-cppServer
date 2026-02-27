@@ -1785,6 +1785,14 @@ private:
         return false;
     }
 
+    static bool is_separator_codepoint(uint32_t cp) {
+        if (cp <= 0x20) return true;
+        if (cp == 0x3000 || cp == 0x00A0 || cp == 0xFEFF || cp == 0xFFFD) return true;
+        if ((cp >= 0x2000 && cp <= 0x206F) || (cp >= 0x2E00 && cp <= 0x2E7F)) return true;
+        if ((cp >= 0x3000 && cp <= 0x303F) || (cp >= 0xFF00 && cp <= 0xFFEF)) return true;
+        return false;
+    }
+
     static std::vector<std::string> tokenize_mixed(const std::string &text) {
         std::vector<std::string> tokens;
         std::vector<std::string> cjk_stream;
@@ -1812,15 +1820,21 @@ private:
                         if (cjk_stream.size() >= 2) {
                             tokens.push_back(cjk_stream[cjk_stream.size() - 2] + cjk_stream[cjk_stream.size() - 1]);
                         }
+                        if (cjk_stream.size() >= 3) {
+                            tokens.push_back(cjk_stream[cjk_stream.size() - 3] +
+                                             cjk_stream[cjk_stream.size() - 2] +
+                                             cjk_stream[cjk_stream.size() - 1]);
+                        }
                         if (cjk_stream.size() > 6) {
                             cjk_stream.erase(cjk_stream.begin());
                         }
                     } else {
-                        cjk_stream.clear();
+                        // 非 CJK 字符统一视作分隔符，不打断已积累的 CJK 上下文，
+                        // 可降低乱码符号/特殊字符对中文召回的负面影响。
                     }
                     i += len;
                 } else {
-                    cjk_stream.clear();
+                    // 对无效字节按分隔符处理，不清空 CJK 上下文，提升乱码场景命中稳定性
                     ++i;
                 }
             }
@@ -1915,6 +1929,8 @@ static inline std::string trim_copy(std::string s)
     return s;
 }
 
+static inline std::string replace_all_copy(std::string s, const std::string &from, const std::string &to);
+
 static inline bool utf8_decode_at_global(const std::string &s, std::size_t i, uint32_t &cp, std::size_t &len)
 {
     unsigned char c0 = static_cast<unsigned char>(s[i]);
@@ -1977,8 +1993,73 @@ static inline std::string sanitize_utf8_text(const std::string &input)
         }
     }
 
+    out = replace_all_copy(out, "—", " ");
+    out = replace_all_copy(out, "–", " ");
+    out = replace_all_copy(out, "―", " ");
+    out = replace_all_copy(out, "…", " ");
+    out = replace_all_copy(out, "•", " ");
+    out = replace_all_copy(out, "·", " ");
+    out = replace_all_copy(out, "“", "\"");
+    out = replace_all_copy(out, "”", "\"");
+    out = replace_all_copy(out, "‘", "'");
+    out = replace_all_copy(out, "’", "'");
+    out = replace_all_copy(out, "【", " ");
+    out = replace_all_copy(out, "】", " ");
+    out = replace_all_copy(out, "「", " ");
+    out = replace_all_copy(out, "」", " ");
+    out = replace_all_copy(out, "『", " ");
+    out = replace_all_copy(out, "』", " ");
+    out = replace_all_copy(out, "（", "(");
+    out = replace_all_copy(out, "）", ")");
+    out = replace_all_copy(out, "\u3000", " ");
+
     out = std::regex_replace(out, std::regex("[ \\t\\r\\f\\v]+"), " ");
     out = std::regex_replace(out, std::regex("\\n{3,}"), "\\n\\n");
+    return trim_copy(out);
+}
+
+static inline bool rag_is_text_codepoint(uint32_t cp)
+{
+    if (cp >= '0' && cp <= '9') return true;
+    if (cp >= 'A' && cp <= 'Z') return true;
+    if (cp >= 'a' && cp <= 'z') return true;
+    if (cp == '_') return true;
+    if (cp >= 0x3400 && cp <= 0x9FFF) return true;
+    if (cp >= 0x3040 && cp <= 0x30FF) return true;
+    if (cp >= 0x31F0 && cp <= 0x31FF) return true;
+    if (cp >= 0xFF10 && cp <= 0xFF19) return true;
+    if (cp >= 0xFF21 && cp <= 0xFF3A) return true;
+    if (cp >= 0xFF41 && cp <= 0xFF5A) return true;
+    return false;
+}
+
+static inline std::string normalize_for_rag_retrieval(const std::string &input)
+{
+    const std::string sanitized = sanitize_utf8_text(input);
+    std::string out;
+    out.reserve(sanitized.size());
+
+    std::size_t i = 0;
+    while (i < sanitized.size()) {
+        uint32_t cp = 0;
+        std::size_t len = 0;
+        if (!utf8_decode_at_global(sanitized, i, cp, len)) {
+            out.push_back(' ');
+            ++i;
+            continue;
+        }
+
+        if (cp == '\n' || cp == '\r' || cp == '\t' || cp == 0x3000 || cp == 0x00A0) {
+            out.push_back(' ');
+        } else if (rag_is_text_codepoint(cp)) {
+            out.append(sanitized, i, len);
+        } else {
+            out.push_back(' ');
+        }
+        i += len;
+    }
+
+    out = std::regex_replace(out, std::regex("[ ]+"), " ");
     return trim_copy(out);
 }
 
@@ -2339,6 +2420,60 @@ static inline fs::path rag_db_dir(const InfoStore &store)
     return store.base_path / "llmdb";
 }
 
+static inline fs::path rag_cache_dir(const InfoStore &store)
+{
+    return rag_db_dir(store) / "__cache__";
+}
+
+static inline std::string rag_cache_key_for_doc(const fs::path &doc_path)
+{
+    std::hash<std::string> hasher;
+    const auto key = hasher(doc_path.filename().string());
+    std::ostringstream oss;
+    oss << std::hex << key;
+    return oss.str();
+}
+
+static inline fs::path rag_cache_path_for_doc(const InfoStore &store, const fs::path &doc_path)
+{
+    return rag_cache_dir(store) / (rag_cache_key_for_doc(doc_path) + ".txt");
+}
+
+static inline void save_rag_cached_text(const InfoStore &store,
+                                        const fs::path &doc_path,
+                                        const std::string &text)
+{
+    fs::create_directories(rag_cache_dir(store));
+    write_text_file(rag_cache_path_for_doc(store, doc_path), normalize_for_rag_retrieval(text));
+}
+
+static inline std::string load_or_build_rag_cached_text(const InfoStore &store,
+                                                        const fs::path &doc_path)
+{
+    const fs::path cache_path = rag_cache_path_for_doc(store, doc_path);
+    if (fs::exists(cache_path)) {
+        std::string cached_raw = trim_copy(read_text_file(cache_path));
+        std::string cached = normalize_for_rag_retrieval(cached_raw);
+        if (!cached.empty()) {
+            if (cached != cached_raw) {
+                write_text_file(cache_path, cached);
+                RuntimeLogger::info("[RAG][缓存] 已更新归一化内容: doc=" + doc_path.filename().string());
+            }
+            RuntimeLogger::debug("[RAG][缓存] 命中: doc=" + doc_path.filename().string());
+            return cached;
+        }
+    }
+
+    RuntimeLogger::info("[RAG][缓存] 未命中，开始解析: doc=" + doc_path.filename().string());
+    std::string parsed = normalize_for_rag_retrieval(extract_text_for_rag(doc_path));
+    if (!parsed.empty()) {
+        save_rag_cached_text(store, doc_path, parsed);
+        RuntimeLogger::info("[RAG][缓存] 已写入: doc=" + doc_path.filename().string() +
+                            ", text_len=" + std::to_string(parsed.size()));
+    }
+    return parsed;
+}
+
 static inline fs::path llm_settings_path(const InfoStore &store)
 {
     return store.base_path / "llm.json";
@@ -2407,9 +2542,12 @@ static inline std::vector<fs::path> list_rag_docs(const InfoStore &store)
 {
     fs::path dir = rag_db_dir(store);
     fs::create_directories(dir);
+    fs::create_directories(rag_cache_dir(store));
     std::vector<fs::path> files;
     for (auto &p : fs::directory_iterator(dir)) {
         if (!p.is_regular_file()) continue;
+        if (p.path().parent_path() == rag_cache_dir(store)) continue;
+        if (p.path().filename() == "__cache__") continue;
         files.push_back(p.path());
     }
     std::sort(files.begin(), files.end());
@@ -2441,6 +2579,9 @@ static inline std::string llm_chat_completion(const LlmSettings &settings,
                                               const std::string &question,
                                               const std::vector<std::string> &contexts)
 {
+    RuntimeLogger::info("[RAG][生成] 开始: question_len=" + std::to_string(question.size()) +
+                        ", contexts=" + std::to_string(contexts.size()) +
+                        ", model=" + settings.model);
     if (settings.base_url.empty() || settings.api_key.empty() || settings.model.empty()) {
         throw std::runtime_error("llm 配置不完整，请先设置 base_url/api_key/model");
     }
@@ -2466,6 +2607,7 @@ static inline std::string llm_chat_completion(const LlmSettings &settings,
     payload << "{\"role\":\"system\",\"content\":\"" << json_escape(system_prompt) << "\"},";
     payload << "{\"role\":\"user\",\"content\":\"" << json_escape(safe_question) << "\"}";
     payload << "]}";
+    RuntimeLogger::info("[RAG][生成] 请求载荷已构建: payload_bytes=" + std::to_string(payload.str().size()));
 
     fs::path tmp_payload = fs::temp_directory_path() / ("llm_payload_" + random_hex_id(12) + ".json");
     write_text_file(tmp_payload, payload.str());
@@ -2504,21 +2646,25 @@ static inline std::string llm_chat_completion(const LlmSettings &settings,
     }
 
     if (res.exit_code != 0) {
+        RuntimeLogger::error("[RAG][生成] 模型请求失败: exit_code=" + std::to_string(res.exit_code));
         throw std::runtime_error("模型请求失败: " + trim_copy(res.output));
     }
 
     auto data = crow::json::load(res.output);
     if (!data || !data.has("choices") || data["choices"].t() != crow::json::type::List || data["choices"].size() == 0) {
+        RuntimeLogger::error("[RAG][生成] 模型响应格式错误");
         throw std::runtime_error("模型响应格式错误: " + trim_copy(res.output));
     }
 
     auto msg = data["choices"][0]["message"];
     if (!msg || !msg.has("content")) {
+        RuntimeLogger::error("[RAG][生成] 模型响应缺少content");
         throw std::runtime_error("模型响应缺少 content");
     }
 
     auto content = msg["content"];
     if (content.t() == crow::json::type::String) {
+        RuntimeLogger::info("[RAG][生成] 完成: content_type=string, answer_len=" + std::to_string(content.s().size()));
         return trim_copy(content.s());
     }
 
@@ -2534,6 +2680,7 @@ static inline std::string llm_chat_completion(const LlmSettings &settings,
                 joined << part["text"].s();
             }
         }
+        RuntimeLogger::info("[RAG][生成] 完成: content_type=list, answer_len=" + std::to_string(joined.str().size()));
         return trim_copy(joined.str());
     }
 
@@ -2604,6 +2751,8 @@ inline void register_info_routes(App &app, InfoStore &store, const std::string &
 
     CROW_ROUTE(app, "/api/llm/rag/upload").methods(crow::HTTPMethod::POST)([&store](const crow::request &req) {
         try {
+            RuntimeLogger::info("[RAG][上传] 收到请求: content_type=" + req.get_header_value("Content-Type") +
+                                ", body_bytes=" + std::to_string(req.body.size()));
             fs::path dir = rag_db_dir(store);
             fs::create_directories(dir);
 
@@ -2624,6 +2773,11 @@ inline void register_info_routes(App &app, InfoStore &store, const std::string &
 
                     fs::path out = dir / (random_hex_id() + "__" + filename);
                     write_text_file(out, part.body);
+                    std::string parsed = load_or_build_rag_cached_text(store, out);
+                    RuntimeLogger::info("[RAG][上传] 保存文档: name=" + filename +
+                                        ", bytes=" + std::to_string(part.body.size()));
+                    RuntimeLogger::info("[RAG][上传] 文档解析完成: name=" + filename +
+                                        ", parsed_len=" + std::to_string(parsed.size()));
                     uploaded[saved] = filename;
                     ++saved;
                 }
@@ -2632,9 +2786,16 @@ inline void register_info_routes(App &app, InfoStore &store, const std::string &
                 if (filename.empty()) filename = "document.txt";
                 fs::path out = dir / (random_hex_id() + "__" + filename);
                 write_text_file(out, req.body);
+                std::string parsed = load_or_build_rag_cached_text(store, out);
+                RuntimeLogger::info("[RAG][上传] 保存文档: name=" + filename +
+                                    ", bytes=" + std::to_string(req.body.size()));
+                RuntimeLogger::info("[RAG][上传] 文档解析完成: name=" + filename +
+                                    ", parsed_len=" + std::to_string(parsed.size()));
                 uploaded[0] = filename;
                 saved = 1;
             }
+
+            RuntimeLogger::info("[RAG][上传] 完成: saved=" + std::to_string(saved));
 
             crow::json::wvalue res;
             res["saved"] = saved;
@@ -2644,6 +2805,7 @@ inline void register_info_routes(App &app, InfoStore &store, const std::string &
             set_json_headers(r);
             return r;
         } catch (const std::exception &e) {
+            RuntimeLogger::error(std::string("[RAG][上传] 失败: ") + e.what());
             crow::response r{std::string("{\"error\":\"") + e.what() + "\"}"};
             r.code = 400;
             set_json_headers(r);
@@ -2654,6 +2816,7 @@ inline void register_info_routes(App &app, InfoStore &store, const std::string &
     CROW_ROUTE(app, "/api/llm/rag/documents").methods(crow::HTTPMethod::GET)([&store]() {
         try {
             auto files = list_rag_docs(store);
+            RuntimeLogger::info("[RAG][文档列表] 查询: count=" + std::to_string(files.size()));
             crow::json::wvalue docs;
             docs = crow::json::wvalue::list();
             for (std::size_t i = 0; i < files.size(); ++i) {
@@ -2670,6 +2833,7 @@ inline void register_info_routes(App &app, InfoStore &store, const std::string &
             set_json_headers(r);
             return r;
         } catch (const std::exception &e) {
+            RuntimeLogger::error(std::string("[RAG][文档列表] 失败: ") + e.what());
             crow::response r{std::string("{\"error\":\"") + e.what() + "\"}"};
             r.code = 400;
             set_json_headers(r);
@@ -2679,6 +2843,7 @@ inline void register_info_routes(App &app, InfoStore &store, const std::string &
 
     CROW_ROUTE(app, "/api/llm/rag/documents/<path>").methods(crow::HTTPMethod::DELETE)([&store](const std::string &name) {
         try {
+            RuntimeLogger::info("[RAG][删除文档] 请求: name=" + name);
             if (name.empty() || name.find("..") != std::string::npos || name.find('/') != std::string::npos || name.find('\\') != std::string::npos) {
                 throw std::runtime_error("invalid name");
             }
@@ -2689,21 +2854,27 @@ inline void register_info_routes(App &app, InfoStore &store, const std::string &
                 std::string raw_name = original_name_from_rag_file(path);
                 std::string disk_name = path.filename().string();
                 if (raw_name == name || disk_name == name) {
+                    const fs::path cache_path = rag_cache_path_for_doc(store, path);
                     std::error_code ec;
                     fs::remove(path, ec);
                     if (ec) {
                         throw std::runtime_error("删除文件失败: " + ec.message());
                     }
+                    std::error_code cache_ec;
+                    fs::remove(cache_path, cache_ec);
                     ++deleted;
                 }
             }
 
             if (deleted == 0) {
+                RuntimeLogger::warn("[RAG][删除文档] 未命中: name=" + name);
                 crow::response r{"{\"error\":\"document not found\"}"};
                 r.code = 404;
                 set_json_headers(r);
                 return r;
             }
+
+            RuntimeLogger::info("[RAG][删除文档] 完成: name=" + name + ", deleted=" + std::to_string(deleted));
 
             crow::json::wvalue res;
             res["status"] = "ok";
@@ -2714,6 +2885,7 @@ inline void register_info_routes(App &app, InfoStore &store, const std::string &
             set_json_headers(r);
             return r;
         } catch (const std::exception &e) {
+            RuntimeLogger::error(std::string("[RAG][删除文档] 失败: ") + e.what());
             crow::response r{std::string("{\"error\":\"") + e.what() + "\"}"};
             r.code = 400;
             set_json_headers(r);
@@ -2723,6 +2895,7 @@ inline void register_info_routes(App &app, InfoStore &store, const std::string &
 
     CROW_ROUTE(app, "/api/llm/rag/download/<path>").methods(crow::HTTPMethod::GET)([&store](const std::string &name) {
         try {
+            RuntimeLogger::info("[RAG][下载文档] 请求: name=" + name);
             if (name.empty() || name.find("..") != std::string::npos || name.find('/') != std::string::npos || name.find('\\') != std::string::npos) {
                 throw std::runtime_error("invalid name");
             }
@@ -2741,11 +2914,14 @@ inline void register_info_routes(App &app, InfoStore &store, const std::string &
             }
 
             if (target_path.empty() || !fs::exists(target_path)) {
+                RuntimeLogger::warn("[RAG][下载文档] 未找到: name=" + name);
                 crow::response r{"{\"error\":\"document not found\"}"};
                 r.code = 404;
                 set_json_headers(r);
                 return r;
             }
+
+            RuntimeLogger::info("[RAG][下载文档] 命中: path=" + target_path.string());
 
             crow::response r{read_text_file(target_path)};
             r.set_header("Content-Type", "application/octet-stream");
@@ -2754,6 +2930,7 @@ inline void register_info_routes(App &app, InfoStore &store, const std::string &
             r.code = 200;
             return r;
         } catch (const std::exception &e) {
+            RuntimeLogger::error(std::string("[RAG][下载文档] 失败: ") + e.what());
             crow::response r{std::string("{\"error\":\"") + e.what() + "\"}"};
             r.code = 400;
             set_json_headers(r);
@@ -2764,13 +2941,16 @@ inline void register_info_routes(App &app, InfoStore &store, const std::string &
     CROW_ROUTE(app, "/api/llm/rag/download").methods(crow::HTTPMethod::GET)([&store]() {
         try {
             fs::path dir = rag_db_dir(store);
+            RuntimeLogger::info("[RAG][下载全集] 开始打包: dir=" + dir.string());
             auto zip_path = create_zip_store(dir, "llm_rag_documents.zip");
+            RuntimeLogger::info("[RAG][下载全集] 打包完成: zip=" + zip_path.string());
             crow::response r{read_text_file(zip_path)};
             r.set_header("Content-Type", "application/zip");
             r.set_header("Content-Disposition", "attachment; filename=\"llm_rag_documents.zip\"");
             r.set_header("Access-Control-Allow-Origin", "*");
             return r;
         } catch (const std::exception &e) {
+            RuntimeLogger::error(std::string("[RAG][下载全集] 失败: ") + e.what());
             crow::response r{std::string("{\"error\":\"") + e.what() + "\"}"};
             r.code = 400;
             set_json_headers(r);
@@ -2780,6 +2960,7 @@ inline void register_info_routes(App &app, InfoStore &store, const std::string &
 
     CROW_ROUTE(app, "/api/llm/chat").methods(crow::HTTPMethod::POST)([&store](const crow::request &req) {
         try {
+            RuntimeLogger::info("[RAG][问答] 收到请求: body_bytes=" + std::to_string(req.body.size()));
             auto body = crow::json::load(req.body);
             if (!body) throw std::runtime_error("invalid json");
             if (!body.has("question") || body["question"].t() != crow::json::type::String) {
@@ -2788,6 +2969,9 @@ inline void register_info_routes(App &app, InfoStore &store, const std::string &
 
             std::string question = trim_copy(body["question"].s());
             if (question.empty()) throw std::runtime_error("question 不能为空");
+            std::string retrieval_question = normalize_for_rag_retrieval(question);
+            RuntimeLogger::info("[RAG][问答] 问题已解析: question_len=" + std::to_string(question.size()) +
+                                ", preview=" + RuntimeLogger::preview(question, 80));
 
             auto cfg = load_llm_settings(store);
             if (body.has("top_k") && body["top_k"].t() == crow::json::type::Number) {
@@ -2803,20 +2987,32 @@ inline void register_info_routes(App &app, InfoStore &store, const std::string &
             if (cfg.top_k > 10) cfg.top_k = 10;
 
             auto files = list_rag_docs_for_index(store);
+            RuntimeLogger::info("[RAG][检索] 可索引文档数=" + std::to_string(files.size()));
             std::vector<std::string> docs;
             int parse_failed = 0;
             std::string first_error;
             for (const auto &p : files) {
                 try {
-                    std::string text = extract_text_for_rag(p);
-                    if (!text.empty()) docs.push_back(std::move(text));
+                    std::string text = load_or_build_rag_cached_text(store, p);
+                    if (!text.empty()) {
+                        RuntimeLogger::debug("[RAG][检索] 文档提取成功: file=" + p.filename().string() +
+                                             ", text_len=" + std::to_string(text.size()));
+                        docs.push_back("[文档名]" + original_name_from_rag_file(p) + "\n" + text);
+                    } else {
+                        RuntimeLogger::warn("[RAG][检索] 文档提取为空: file=" + p.filename().string());
+                    }
                 } catch (const std::exception &ex) {
                     ++parse_failed;
+                    RuntimeLogger::warn(std::string("[RAG][检索] 文档提取失败: file=") + p.filename().string() +
+                                        ", error=" + ex.what());
                     if (first_error.empty()) {
                         first_error = p.filename().string() + ": " + ex.what();
                     }
                 }
             }
+
+            RuntimeLogger::info("[RAG][检索] 文档提取完成: success=" + std::to_string(docs.size()) +
+                                ", failed=" + std::to_string(parse_failed));
 
             if (!files.empty() && docs.empty()) {
                 std::string msg = "RAG 文档存在，但未提取到可索引文本";
@@ -2829,8 +3025,12 @@ inline void register_info_routes(App &app, InfoStore &store, const std::string &
 
             RagIndex index;
             int chunks = index.index_documents(docs);
-            auto contexts = index.retrieve(question, cfg.top_k);
+            RuntimeLogger::info("[RAG][检索] 索引完成: chunks=" + std::to_string(chunks));
+            auto contexts = index.retrieve(retrieval_question, cfg.top_k);
+            RuntimeLogger::info("[RAG][检索] 召回完成: top_k=" + std::to_string(cfg.top_k) +
+                                ", hit=" + std::to_string(contexts.size()));
             std::string answer = llm_chat_completion(cfg, question, contexts);
+            RuntimeLogger::info("[RAG][问答] 回答生成完成: answer_len=" + std::to_string(answer.size()));
 
             crow::json::wvalue context_arr;
             context_arr = crow::json::wvalue::list();
@@ -2847,6 +3047,7 @@ inline void register_info_routes(App &app, InfoStore &store, const std::string &
             set_json_headers(r);
             return r;
         } catch (const std::exception &e) {
+            RuntimeLogger::error(std::string("[RAG][问答] 失败: ") + e.what());
             crow::response r{std::string("{\"error\":\"") + e.what() + "\"}"};
             r.code = 400;
             set_json_headers(r);
