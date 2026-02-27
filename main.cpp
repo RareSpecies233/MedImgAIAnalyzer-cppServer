@@ -58,7 +58,13 @@ int main(int argc, char **argv)
     }
 
     if (onnx_path.empty()) {
-        std::cerr << "警告: 未选中onnx文件，无法使用推理功能！！！" << std::endl;
+        std::cerr << "================================================" << std::endl;
+        std::cerr << "| 警告: 未选中onnx文件，无法使用推理功能！！！ |" << std::endl;
+        std::cerr << "| 警告: 未选中onnx文件，无法使用推理功能！！！ |" << std::endl;
+        std::cerr << "| 警告: 未选中onnx文件，无法使用推理功能！！！ |" << std::endl;
+        std::cerr << "| 警告: 未选中onnx文件，无法使用推理功能！！！ |" << std::endl;
+        std::cerr << "| 警告: 未选中onnx文件，无法使用推理功能！！！ |" << std::endl;
+        std::cerr << "================================================" << std::endl;
         RuntimeLogger::warn("未指定 ONNX 文件，推理接口将不可用");
     }
     crow::logger::setLogLevel(crow_debug ? crow::LogLevel::Debug : crow::LogLevel::Warning);
