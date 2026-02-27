@@ -31,15 +31,16 @@ public:
 
         if (save_to_file_) {
             std::error_code ec;
-            std::filesystem::create_directories(db_dir, ec);
+            const auto log_dir = db_dir / "logs";
+            std::filesystem::create_directories(log_dir, ec);
             if (ec) {
                 save_to_file_ = false;
-                write_line_unlocked("ERROR", "创建日志目录失败: " + db_dir.string() + ", error=" + ec.message());
+                write_line_unlocked("ERROR", "创建日志目录失败: " + log_dir.string() + ", error=" + ec.message());
                 return;
             }
 
             const std::string stamp = filename_stamp_local();
-            log_file_path_ = (db_dir / (stamp + "log.txt")).string();
+            log_file_path_ = (log_dir / (stamp + ".txt")).string();
             log_file_.open(log_file_path_, std::ios::out | std::ios::app | std::ios::binary);
             if (!log_file_) {
                 save_to_file_ = false;

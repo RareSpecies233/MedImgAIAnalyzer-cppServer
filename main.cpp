@@ -16,6 +16,7 @@ int main(int argc, char **argv)
     std::cout << "======================================" << std::endl;
     std::string onnx_path;
     bool no_log_file = false;
+    bool crow_debug = false;
     int infer_threads = static_cast<int>(std::thread::hardware_concurrency());
     if (infer_threads <= 0) infer_threads = 1;
 
@@ -29,6 +30,8 @@ int main(int argc, char **argv)
             onnx_path = argv[++i];
         } else if (key == "--nolog") {
             no_log_file = true;
+        } else if (key == "--crowdebug") {
+            crow_debug = true;
         } else if (key == "--infer-threads") {
             if (i + 1 >= argc) {
                 std::cerr << "错误: --infer-threads 参数缺少数值" << std::endl;
@@ -40,7 +43,7 @@ int main(int argc, char **argv)
                 return 1;
             }
         } else if (key == "--help" || key == "-h") {
-            std::cout << "用法: ./main [--onnx <model.onnx>] [--infer-threads <N>] [--nolog]" << std::endl;
+            std::cout << "用法: ./main [--onnx <model.onnx>] [--infer-threads <N>] [--nolog] [--crowdebug]" << std::endl;
             return 0;
         }
     }
@@ -49,6 +52,7 @@ int main(int argc, char **argv)
     RuntimeLogger::info("程序启动，参数解析完成");
     RuntimeLogger::info(std::string("推理线程数: ") + std::to_string(infer_threads));
     RuntimeLogger::info(std::string("日志文件保存: ") + (no_log_file ? "关闭" : "开启"));
+    RuntimeLogger::info(std::string("Crow日志级别: ") + (crow_debug ? "DEBUG(全量)" : "WARNING及以上"));
     if (!onnx_path.empty()) {
         RuntimeLogger::info("ONNX 路径: " + onnx_path);
     }
@@ -58,6 +62,7 @@ int main(int argc, char **argv)
         RuntimeLogger::warn("未指定 ONNX 文件，推理接口将不可用");
     }
     crow::App<RequestLogMiddleware> app;
+    app.loglevel(crow_debug ? crow::LogLevel::Debug : crow::LogLevel::Warning);
 
     // 初始化数据库（若缺失则创建 db/info.json）
     InfoStore store;

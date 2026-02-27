@@ -624,6 +624,7 @@ static_assert(sizeof(Nifti1Header) == 348, "Nifti1Header 大小必须为 348 字
 
 static inline void dcm_to_npz(const fs::path &input_path, const fs::path &out_path)
 {
+    RuntimeLogger::info("[dcm转npz] 开始: " + input_path.string() + " -> " + out_path.string());
     const std::vector<uint8_t> dcm_bytes = [&] {
         std::string raw = read_text_file(input_path);
         return std::vector<uint8_t>(raw.begin(), raw.end());
@@ -632,6 +633,7 @@ static inline void dcm_to_npz(const fs::path &input_path, const fs::path &out_pa
     std::vector<uint8_t> embedded_npz;
     if (try_extract_embedded_npz_from_bytes(dcm_bytes, &embedded_npz)) {
         write_text_file(out_path, std::string(embedded_npz.begin(), embedded_npz.end()));
+        RuntimeLogger::info("[dcm转npz] 完成(命中嵌入NPZ): " + out_path.string());
         return;
     }
 
@@ -659,10 +661,12 @@ static inline void dcm_to_npz(const fs::path &input_path, const fs::path &out_pa
     const std::vector<size_t> shape{rows, cols};
     cnpy::npz_save(out_path.string(), "image", image.data(), shape, "w");
     cnpy::npz_save(out_path.string(), "label", label.data(), shape, "a");
+    RuntimeLogger::info("[dcm转npz] 完成: " + out_path.string() + ", rows=" + std::to_string(rows) + ", cols=" + std::to_string(cols));
 }
 
 static inline void npz_to_dcm(const fs::path &input_path, const fs::path &out_path, const std::string &key)
 {
+    RuntimeLogger::info("[npz转dcm] 开始: " + input_path.string() + " -> " + out_path.string() + ", key=" + key);
     const auto npz_map = cnpy::npz_load(input_path.string());
     auto it = npz_map.find(key);
     if (it == npz_map.end()) {
@@ -728,10 +732,12 @@ static inline void npz_to_dcm(const fs::path &input_path, const fs::path &out_pa
     append_tag(out, 0x7FE0, 0x0010, "OW", pixel_bytes);
 
     write_text_file(out_path, std::string(out.begin(), out.end()));
+    RuntimeLogger::info("[npz转dcm] 完成: " + out_path.string() + ", rows=" + std::to_string(rows) + ", cols=" + std::to_string(cols));
 }
 
 static inline void npz_to_nii(const fs::path &input_path, const fs::path &out_path, const std::string &key)
 {
+    RuntimeLogger::info("[npz转nii] 开始: " + input_path.string() + " -> " + out_path.string() + ", key=" + key);
     const auto npz_map = cnpy::npz_load(input_path.string());
     auto it = npz_map.find(key);
     if (it == npz_map.end()) {
@@ -816,10 +822,12 @@ static inline void npz_to_nii(const fs::path &input_path, const fs::path &out_pa
     std::memcpy(out.data() + static_cast<long>(base), image_f32.data(), data_bytes);
 
     write_text_file(out_path, std::string(out.begin(), out.end()));
+    RuntimeLogger::info("[npz转nii] 完成: " + out_path.string());
 }
 
 static inline void nii_to_npz(const fs::path &input_path, const fs::path &out_path, int slice_index = -1)
 {
+    RuntimeLogger::info("[nii转npz] 开始: " + input_path.string() + " -> " + out_path.string());
     const std::string raw = read_text_file(input_path);
     const std::vector<uint8_t> all(raw.begin(), raw.end());
     if (all.size() < 352) {
@@ -829,6 +837,7 @@ static inline void nii_to_npz(const fs::path &input_path, const fs::path &out_pa
     std::vector<uint8_t> embedded_npz;
     if (try_extract_embedded_npz_from_bytes(all, &embedded_npz)) {
         write_text_file(out_path, std::string(embedded_npz.begin(), embedded_npz.end()));
+        RuntimeLogger::info("[nii转npz] 完成(命中嵌入NPZ): " + out_path.string());
         return;
     }
 
@@ -887,10 +896,12 @@ static inline void nii_to_npz(const fs::path &input_path, const fs::path &out_pa
               image.begin());
 
     save_onnx_compatible_npz(out_path, {static_cast<size_t>(d1), static_cast<size_t>(d2)}, image);
+    RuntimeLogger::info("[nii转npz] 完成: " + out_path.string() + ", 使用切片=" + std::to_string(use_slice));
 }
 
 static inline void png_to_npz(const fs::path &input_path, const fs::path &out_path)
 {
+    RuntimeLogger::info("[png转npz] 开始: " + input_path.string() + " -> " + out_path.string());
     const cv::Mat gray = cv::imread(input_path.string(), cv::IMREAD_GRAYSCALE);
     if (gray.empty()) {
         throw std::runtime_error("读取 png 失败: " + input_path.string());
@@ -899,10 +910,12 @@ static inline void png_to_npz(const fs::path &input_path, const fs::path &out_pa
     save_onnx_compatible_npz(out_path,
                              {static_cast<size_t>(gray.rows), static_cast<size_t>(gray.cols)},
                              image);
+    RuntimeLogger::info("[png转npz] 完成: " + out_path.string() + ", rows=" + std::to_string(gray.rows) + ", cols=" + std::to_string(gray.cols));
 }
 
 static inline void npz_to_png(const fs::path &input_path, const fs::path &out_path, const std::string &key = "image")
 {
+    RuntimeLogger::info("[npz转png] 开始: " + input_path.string() + " -> " + out_path.string() + ", key=" + key);
     const auto npz_map = cnpy::npz_load(input_path.string());
     auto it = npz_map.find(key);
     if (it == npz_map.end()) {
@@ -915,18 +928,19 @@ static inline void npz_to_png(const fs::path &input_path, const fs::path &out_pa
     if (!cv::imwrite(out_path.string(), image)) {
         throw std::runtime_error("写入 png 失败: " + out_path.string());
     }
+    RuntimeLogger::info("[npz转png] 完成: " + out_path.string() + ", rows=" + std::to_string(h) + ", cols=" + std::to_string(w));
 }
 
 static inline void all2npz(const fs::path &src, const fs::path &dst)
 {
-    RuntimeLogger::info("文件转换开始 all2npz: src=" + src.string() + " -> dst=" + dst.string());
+    RuntimeLogger::info("[任意转npz] 开始: " + src.string() + " -> " + dst.string());
     std::error_code ec;
     fs::create_directories(dst.parent_path(), ec);
     const std::string ext = to_lower_copy(src.extension().string());
     if (ext == ".npz") {
         fs::copy_file(src, dst, fs::copy_options::overwrite_existing, ec);
         if (ec) throw std::runtime_error("npz 复制失败: " + ec.message());
-        RuntimeLogger::info("文件转换完成 all2npz(复制): " + dst.string());
+        RuntimeLogger::info("[任意转npz] 完成(npz复制): " + dst.string());
         return;
     }
     if (ext == ".dcm") {
@@ -949,14 +963,14 @@ static inline void all2npz(const fs::path &src, const fs::path &dst)
 
 static inline void all2png(const fs::path &src, const fs::path &dst)
 {
-    RuntimeLogger::info("文件转换开始 all2png: src=" + src.string() + " -> dst=" + dst.string());
+    RuntimeLogger::info("[任意转png] 开始: " + src.string() + " -> " + dst.string());
     std::error_code ec;
     fs::create_directories(dst.parent_path(), ec);
     const std::string ext = to_lower_copy(src.extension().string());
     if (ext == ".png") {
         fs::copy_file(src, dst, fs::copy_options::overwrite_existing, ec);
         if (ec) throw std::runtime_error("png 复制失败: " + ec.message());
-        RuntimeLogger::info("文件转换完成 all2png(复制): " + dst.string());
+        RuntimeLogger::info("[任意转png] 完成(png复制): " + dst.string());
         return;
     }
     if (ext == ".npz") {
@@ -971,7 +985,7 @@ static inline void all2png(const fs::path &src, const fs::path &dst)
         npz_to_png(tmp_npz, dst, "image");
         fs::remove(tmp_npz, ec);
         RuntimeLogger::debug("清理临时转换文件: " + tmp_npz.string());
-        RuntimeLogger::info("文件转换完成 复合流程->png: " + dst.string());
+        RuntimeLogger::info("[任意转png] 完成(复合流程): " + dst.string());
         return;
     }
     throw std::runtime_error("不支持转换为png的文件类型: " + src.extension().string());
@@ -984,7 +998,7 @@ static inline void convert_npz_to_pngs(const fs::path &npz_path,
                                        bool write_raw_png = true,
                                        const std::string &marked_suffix = "_marked")
 {
-    RuntimeLogger::info("NPZ 转 PNG 流程开始: npz=" + npz_path.string() +
+    RuntimeLogger::info("[npz转png] 流程开始: npz=" + npz_path.string() +
                         ", png_dir=" + png_dir.string() +
                         ", marked_dir=" + marked_dir.string() +
                         ", marked=" + (marked ? std::string("true") : std::string("false")));
@@ -1021,7 +1035,7 @@ static inline void convert_npz_to_pngs(const fs::path &npz_path,
         fs::create_directories(png_dir);
         fs::path out_png = png_dir / (npz_path.stem().string() + ".png");
         if (!cv::imwrite(out_png.string(), raw_u8)) throw std::runtime_error("写入png失败");
-        RuntimeLogger::info("输出原始 PNG: " + out_png.string());
+        RuntimeLogger::info("[npz转png] 输出原始PNG: " + out_png.string());
     }
 
     if (marked) {
@@ -1054,10 +1068,10 @@ static inline void convert_npz_to_pngs(const fs::path &npz_path,
         }
         fs::path out_marked = marked_dir / (npz_path.stem().string() + marked_suffix + ".png");
         if (!cv::imwrite(out_marked.string(), rgba)) throw std::runtime_error("写入markedpng失败");
-        RuntimeLogger::info("输出标注 PNG: " + out_marked.string());
+        RuntimeLogger::info("[npz转png] 输出标注PNG: " + out_marked.string());
     }
 
-    RuntimeLogger::info("NPZ 转 PNG 流程完成: " + npz_path.string());
+    RuntimeLogger::info("[npz转png] 流程完成: " + npz_path.string());
 }
 
 static inline bool is_valid_crop(int xL, int xR, int yL, int yR, int width, int height)
@@ -1175,6 +1189,11 @@ static inline std::vector<int64_t> run_onnx_inference_mask(const fs::path &onnx_
     int height = 0;
     int width = 0;
     std::vector<double> raw = npy_to_double_2d(raw_arr, height, width);
+    RuntimeLogger::info("[推理] 开始ONNX推理: model=" + onnx_path.string() +
+                        ", input_rows=" + std::to_string(height) +
+                        ", input_cols=" + std::to_string(width) +
+                        ", img_size=" + std::to_string(img_size) +
+                        ", out_size=" + std::to_string(out_size));
     normalize_image_inplace(raw);
     std::vector<double> resized = resize_image(raw, height, width, img_size);
     std::vector<float> input_chw = make_input_tensor_chw(resized, img_size, 3);
@@ -1186,6 +1205,8 @@ static inline std::vector<int64_t> run_onnx_inference_mask(const fs::path &onnx_
         cpu_threads = static_cast<int>(std::thread::hardware_concurrency());
     }
     if (cpu_threads <= 0) cpu_threads = 1;
+    RuntimeLogger::debug("[推理] ONNX线程配置: intra=" + std::to_string(cpu_threads) +
+                         ", inter=" + std::to_string(std::max(1, cpu_threads / 2)));
     opts.SetIntraOpNumThreads(cpu_threads);
     opts.SetInterOpNumThreads(std::max(1, cpu_threads / 2));
     if (cpu_threads > 1) {
@@ -1324,7 +1345,10 @@ static inline std::vector<int64_t> run_onnx_inference_mask(const fs::path &onnx_
         }
     }
 
-    return resize_mask_nearest_from_int(pred, static_cast<int>(out_h), static_cast<int>(out_w), out_size);
+    auto out_mask = resize_mask_nearest_from_int(pred, static_cast<int>(out_h), static_cast<int>(out_w), out_size);
+    RuntimeLogger::info("[推理] ONNX推理完成: out_rows=" + std::to_string(out_size) +
+                        ", out_cols=" + std::to_string(out_size));
+    return out_mask;
 }
 
 static inline void save_npz_with_same_keys(const std::string &src_npz,
@@ -1519,6 +1543,7 @@ static inline fs::path create_zip_store(const fs::path &dir, const std::string &
     if (!fs::exists(dir)) throw std::runtime_error("目录不存在");
     fs::path tmp = fs::temp_directory_path() / zip_name;
     if (fs::exists(tmp)) fs::remove(tmp);
+    RuntimeLogger::info("[目录转zip] 开始: " + dir.string() + " -> " + tmp.string());
 
     int rc = 0;
 #ifdef _WIN32
@@ -1529,10 +1554,10 @@ static inline fs::path create_zip_store(const fs::path &dir, const std::string &
         src_glob +
         "' -DestinationPath '" +
         dst_zip +
-        "' -CompressionLevel NoCompression -Force\"";
+        "' -CompressionLevel Optimal -Force\"";
     rc = std::system(cmd.c_str());
 #else
-    std::string cmd = "zip -0 -r " + shell_escape(tmp.string()) + " .";
+    std::string cmd = "zip -r " + shell_escape(tmp.string()) + " .";
     auto cwd = fs::current_path();
     fs::current_path(dir);
     try {
@@ -1545,6 +1570,7 @@ static inline fs::path create_zip_store(const fs::path &dir, const std::string &
 #endif
 
     if (rc != 0 || !fs::exists(tmp)) throw std::runtime_error("zip 失败");
+    RuntimeLogger::info("[目录转zip] 完成: " + tmp.string());
     return tmp;
 }
 
@@ -1554,11 +1580,16 @@ static inline void ensure_converted_from_npz_dir(const fs::path &npz_dir,
                                                  const std::string &npz_key)
 {
     auto existing = list_files(out_dir);
-    if (!existing.empty()) return;
+    if (!existing.empty()) {
+        RuntimeLogger::info("[npz转" + target + "] 跳过: 目标目录已有文件, dir=" + out_dir.string());
+        return;
+    }
 
     if (!fs::exists(npz_dir)) {
         throw std::runtime_error("源npz目录不存在，无法转换");
     }
+
+    RuntimeLogger::info("[npz转" + target + "] 开始批量转换: src_dir=" + npz_dir.string() + ", out_dir=" + out_dir.string());
 
     fs::create_directories(out_dir);
     auto npz_files = list_files(npz_dir);
@@ -1581,6 +1612,7 @@ static inline void ensure_converted_from_npz_dir(const fs::path &npz_dir,
     if (converted == 0) {
         throw std::runtime_error("源npz目录为空，无法转换");
     }
+    RuntimeLogger::info("[npz转" + target + "] 完成批量转换: count=" + std::to_string(converted));
 }
 
 struct LlmSettings {
@@ -2908,6 +2940,7 @@ inline void register_info_routes(App &app, InfoStore &store, const std::string &
     // 初始化完成
     CROW_ROUTE(app, "/api/project/<string>/inited").methods(crow::HTTPMethod::POST)([&store](const crow::request &req, const std::string &uuid){
         try {
+            RuntimeLogger::info("[项目初始化] 开始: uuid=" + uuid);
             if (!store.exists(uuid)) throw std::runtime_error("project not found");
             auto maybe_raw = extract_string_field(req.body, "raw");
             if (!maybe_raw) throw std::runtime_error("missing raw");
@@ -2925,6 +2958,7 @@ inline void register_info_routes(App &app, InfoStore &store, const std::string &
 
             auto temp_files = list_files(temp_dir);
             if (temp_files.empty()) throw std::runtime_error("temp 为空");
+            RuntimeLogger::info("[项目初始化] temp文件数量=" + std::to_string(temp_files.size()) + ", raw=" + raw);
 
             if (raw != "npz" && raw != "markednpz") {
                 fs::create_directories(npz_dir);
@@ -2966,6 +3000,7 @@ inline void register_info_routes(App &app, InfoStore &store, const std::string &
             if (raw == "dcm") kv["dcm"] = "\"raw\"";
             if (raw == "nii") kv["nii"] = "\"raw\"";
             update_project_json_fields(project_json, kv);
+            RuntimeLogger::info("[项目初始化] 完成: uuid=" + uuid + ", raw_dir=" + raw_dir);
 
             crow::response r{"{\"status\":\"ok\"}"};
             r.code = 200; set_json_headers(r); return r;
@@ -2978,6 +3013,7 @@ inline void register_info_routes(App &app, InfoStore &store, const std::string &
     // 开始推理（处理 npz）
     CROW_ROUTE(app, "/api/project/<string>/start_analysis").methods(crow::HTTPMethod::POST)([&store, onnx_path, infer_threads](const crow::request &req, const std::string &uuid){
         try {
+            RuntimeLogger::info("[推理流程] 开始: uuid=" + uuid);
             if (!store.exists(uuid)) throw std::runtime_error("project not found");
             if (onnx_path.empty()) {
                 throw std::runtime_error("未指定onnx文件，无法使用推理功能");
@@ -2993,6 +3029,7 @@ inline void register_info_routes(App &app, InfoStore &store, const std::string &
             if (mode_val != "raw" && mode_val != "semi") {
                 throw std::runtime_error("invalid mode");
             }
+            RuntimeLogger::info("[推理流程] 参数: mode=" + mode_val + ", infer_threads=" + std::to_string(infer_threads));
 
             fs::path project_dir = store.base_path / uuid;
             fs::path project_json = project_dir / "project.json";
@@ -3010,20 +3047,18 @@ inline void register_info_routes(App &app, InfoStore &store, const std::string &
             fs::path processed_dir = project_dir / "processed";
             fs::path processed_npz_dir = processed_dir / "npzs";
             fs::path processed_png_dir = processed_dir / "pngs";
-            fs::path processed_dcm_dir = processed_dir / "dcm";
-            fs::path processed_nii_dir = processed_dir / "nii";
             std::error_code ec;
             fs::remove_all(processed_dir, ec);
             fs::remove_all(project_dir / "3d", ec);
             fs::remove_all(project_dir / "OG3d", ec);
             fs::create_directories(processed_npz_dir);
             fs::create_directories(processed_png_dir);
-            fs::create_directories(processed_dcm_dir);
-            fs::create_directories(processed_nii_dir);
+            RuntimeLogger::info("[推理流程] 已重置输出目录: " + processed_dir.string());
 
             const int out_size = 512;
             const int img_size = 224;
             for (const auto &src : npz_files) {
+                RuntimeLogger::info("[推理流程] 处理文件: " + src.filename().string());
                 cnpy::npz_t npz = cnpy::npz_load(src.string());
                 const cnpy::NpyArray *raw_arr = find_npz_array(npz, {"image", "img", "raw", "ct", "data", "slice", "input"});
                 if (!raw_arr) {
@@ -3052,22 +3087,20 @@ inline void register_info_routes(App &app, InfoStore &store, const std::string &
                                         crop_xR,
                                         crop_yL,
                                         crop_yR);
+                RuntimeLogger::info("[推理流程] 输出NPZ: " + out_npz.string());
 
                 convert_npz_to_pngs(out_npz, processed_png_dir, processed_png_dir, true, false, "");
-
-                fs::path out_dcm = processed_dcm_dir / (src.stem().string() + "-PD.dcm");
-                fs::path out_nii = processed_nii_dir / (src.stem().string() + "-PD.nii");
-                npz_to_dcm(out_npz, out_dcm, "label");
-                npz_to_nii(out_npz, out_nii, "label");
+                RuntimeLogger::info("[推理流程] 输出PNG完成: " + src.stem().string());
             }
 
             update_project_json_fields(project_json, {
                 {"processed", "\"" + mode_val + "\""},
                 {"PD", "\"" + mode_val + "\""},
-                {"PD-nii", "true"},
-                {"PD-dcm", "true"},
+                {"PD-nii", "false"},
+                {"PD-dcm", "false"},
                 {"PD-3d", "false"}
             });
+            RuntimeLogger::info("[推理流程] 完成: uuid=" + uuid + ", 文件数=" + std::to_string(npz_files.size()));
 
             crow::response r{"{\"status\":\"ok\"}"};
             r.code = 200; set_json_headers(r); return r;
@@ -3226,6 +3259,7 @@ inline void register_info_routes(App &app, InfoStore &store, const std::string &
     // 下载 png
     CROW_ROUTE(app, "/api/project/<string>/download/png").methods(crow::HTTPMethod::GET)([&store](const std::string &uuid){
         try {
+            RuntimeLogger::info("[下载] 请求PNG压缩包: uuid=" + uuid);
             if (!store.exists(uuid)) throw std::runtime_error("project not found");
             fs::path dir = store.base_path / uuid / "png";
             auto zip_path = create_zip_store(dir, uuid + "_png.zip");
@@ -3242,6 +3276,7 @@ inline void register_info_routes(App &app, InfoStore &store, const std::string &
     // 下载 npz
     CROW_ROUTE(app, "/api/project/<string>/download/npz").methods(crow::HTTPMethod::GET)([&store](const std::string &uuid){
         try {
+            RuntimeLogger::info("[下载] 请求NPZ压缩包: uuid=" + uuid);
             if (!store.exists(uuid)) throw std::runtime_error("project not found");
             fs::path dir = store.base_path / uuid / "npz";
             auto zip_path = create_zip_store(dir, uuid + "_npz.zip");
@@ -3258,10 +3293,12 @@ inline void register_info_routes(App &app, InfoStore &store, const std::string &
     // 下载 dcm
     CROW_ROUTE(app, "/api/project/<string>/download/dcm").methods(crow::HTTPMethod::GET)([&store](const std::string &uuid){
         try {
+            RuntimeLogger::info("[下载] 请求DCM压缩包: uuid=" + uuid);
             if (!store.exists(uuid)) throw std::runtime_error("project not found");
             fs::path project_dir = store.base_path / uuid;
             fs::path dir = project_dir / "dcm";
             if (list_files(dir).empty()) {
+                RuntimeLogger::info("[下载触发转换] [npz转dcm] 目录为空，开始按需转换: uuid=" + uuid);
                 ensure_converted_from_npz_dir(project_dir / "npz", dir, "dcm", "image");
                 update_project_json_fields(project_dir / "project.json", {{"dcm", "true"}});
             }
@@ -3279,10 +3316,12 @@ inline void register_info_routes(App &app, InfoStore &store, const std::string &
     // 下载 nii
     CROW_ROUTE(app, "/api/project/<string>/download/nii").methods(crow::HTTPMethod::GET)([&store](const std::string &uuid){
         try {
+            RuntimeLogger::info("[下载] 请求NII压缩包: uuid=" + uuid);
             if (!store.exists(uuid)) throw std::runtime_error("project not found");
             fs::path project_dir = store.base_path / uuid;
             fs::path dir = project_dir / "nii";
             if (list_files(dir).empty()) {
+                RuntimeLogger::info("[下载触发转换] [npz转nii] 目录为空，开始按需转换: uuid=" + uuid);
                 ensure_converted_from_npz_dir(project_dir / "npz", dir, "nii", "image");
                 update_project_json_fields(project_dir / "project.json", {{"nii", "true"}});
             }
@@ -3332,10 +3371,12 @@ inline void register_info_routes(App &app, InfoStore &store, const std::string &
     // 下载 processed dcm
     CROW_ROUTE(app, "/api/project/<string>/download/processed/dcm").methods(crow::HTTPMethod::GET)([&store](const std::string &uuid){
         try {
+            RuntimeLogger::info("[下载] 请求processed DCM压缩包: uuid=" + uuid);
             if (!store.exists(uuid)) throw std::runtime_error("project not found");
             fs::path project_dir = store.base_path / uuid;
             fs::path dir = project_dir / "processed" / "dcm";
             if (list_files(dir).empty()) {
+                RuntimeLogger::info("[下载触发转换] [npz转dcm] processed目录为空，开始按需转换: uuid=" + uuid);
                 ensure_converted_from_npz_dir(project_dir / "processed" / "npzs", dir, "dcm", "label");
                 update_project_json_fields(project_dir / "project.json", {{"PD-dcm", "true"}});
             }
@@ -3353,10 +3394,12 @@ inline void register_info_routes(App &app, InfoStore &store, const std::string &
     // 下载 processed nii
     CROW_ROUTE(app, "/api/project/<string>/download/processed/nii").methods(crow::HTTPMethod::GET)([&store](const std::string &uuid){
         try {
+            RuntimeLogger::info("[下载] 请求processed NII压缩包: uuid=" + uuid);
             if (!store.exists(uuid)) throw std::runtime_error("project not found");
             fs::path project_dir = store.base_path / uuid;
             fs::path dir = project_dir / "processed" / "nii";
             if (list_files(dir).empty()) {
+                RuntimeLogger::info("[下载触发转换] [npz转nii] processed目录为空，开始按需转换: uuid=" + uuid);
                 ensure_converted_from_npz_dir(project_dir / "processed" / "npzs", dir, "nii", "label");
                 update_project_json_fields(project_dir / "project.json", {{"PD-nii", "true"}});
             }
@@ -3374,6 +3417,7 @@ inline void register_info_routes(App &app, InfoStore &store, const std::string &
     // 转换为 3d 模型
     CROW_ROUTE(app, "/api/project/<string>/to_3d_model").methods(crow::HTTPMethod::POST)([&store](const std::string &uuid){
         try {
+            RuntimeLogger::info("[npz转glb] 开始3D模型转换: uuid=" + uuid);
             if (!store.exists(uuid)) throw std::runtime_error("project not found");
             fs::path project_dir = store.base_path / uuid;
             fs::path project_json = project_dir / "project.json";
@@ -3393,6 +3437,7 @@ inline void register_info_routes(App &app, InfoStore &store, const std::string &
             opts.use_raw_threshold = true;
             fs::path out_glb = out_dir / "model.glb";
             npz_to_glb::convert_directory_to_glb(processed_npz_dir, out_glb, opts);
+            RuntimeLogger::info("[npz转glb] 生成processed模型: " + out_glb.string());
 
             auto raw_val = extract_string_field(json, "raw");
             if (raw_val && to_lower_copy(*raw_val) == "markednpz") {
@@ -3402,9 +3447,11 @@ inline void register_info_routes(App &app, InfoStore &store, const std::string &
                 fs::path og_glb = og_dir / "model.glb";
                 fs::path raw_npz_dir = project_dir / "npz";
                 npz_to_glb::convert_directory_to_glb(raw_npz_dir, og_glb, opts);
+                RuntimeLogger::info("[npz转glb] 生成原始模型: " + og_glb.string());
             }
 
             update_project_json_fields(project_json, {{"PD-3d", "true"}});
+            RuntimeLogger::info("[npz转glb] 完成3D模型转换: uuid=" + uuid);
 
             crow::response r{"{\"status\":\"ok\"}"};
             r.code = 200; set_json_headers(r); return r;

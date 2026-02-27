@@ -1,11 +1,14 @@
 已知的bug
-1. [等待修复]  [vue3/cpp] Ai处理时会同时导出dcm/nii
-2. [暂时跳过]  [release环境不会/windows不care] [vue3] 会拿起浏览器弹窗强制显示在前台
-3. [ 已修复 ]  [cpp-50619f7] [cpp/windows] windows平台无法打包zip
-4. [等待修复]  [macOS/vue3] macOS下推理成功时仍提示失败（目前已做ui上的优化）
-5. [正在修复]  [onnx/python] 新的模型有问题，无法正常使用
-6. [等待修复]  [vue3/cpp] 下载时貌似每次都会再走一次转换流程
-7. [等待修复]  [cpp] RAG目前是随用随解析，需要改为上传时解析
-8. [等待修复]  [cpp/windows] windows平台的RAG没有macOS准确
-9. [ 已修复 ]  [cpp-5d88681] [cpp] 能否将推理作为cpu多线程的？
+[ 不修复 ]  [等待新版算法...] [onnx/python] 新的模型有问题，无法正常使用
+[暂时跳过]  [release环境不会/windows不care] [vue3] 会拿起浏览器弹窗强制显示在前台
+
+[ 已修复 ]  [cpp-5d88681] [cpp] 能否将推理作为cpu多线程的？
+[ 已修复 ]  [cpp-50619f7] [cpp/windows] windows平台无法打包zip
+
+[正在修复]  [vue3/cpp] Ai处理时会同时导出dcm/nii
+[正在修复]  [vue3/cpp] 下载时貌似每次都会再走一次转换流程
+
+[等待修复]  [macOS/vue3] macOS下推理成功时仍提示失败（目前已做ui上的优化）
+[等待修复]  [cpp] RAG目前是随用随解析，需要改为上传时解析
+[等待修复]  [cpp/windows] windows平台的RAG没有macOS准确
 
