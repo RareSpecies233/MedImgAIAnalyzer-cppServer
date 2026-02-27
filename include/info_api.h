@@ -2018,51 +2018,6 @@ static inline std::string sanitize_utf8_text(const std::string &input)
     return trim_copy(out);
 }
 
-static inline bool rag_is_text_codepoint(uint32_t cp)
-{
-    if (cp >= '0' && cp <= '9') return true;
-    if (cp >= 'A' && cp <= 'Z') return true;
-    if (cp >= 'a' && cp <= 'z') return true;
-    if (cp == '_') return true;
-    if (cp >= 0x3400 && cp <= 0x9FFF) return true;
-    if (cp >= 0x3040 && cp <= 0x30FF) return true;
-    if (cp >= 0x31F0 && cp <= 0x31FF) return true;
-    if (cp >= 0xFF10 && cp <= 0xFF19) return true;
-    if (cp >= 0xFF21 && cp <= 0xFF3A) return true;
-    if (cp >= 0xFF41 && cp <= 0xFF5A) return true;
-    return false;
-}
-
-static inline std::string normalize_for_rag_retrieval(const std::string &input)
-{
-    const std::string sanitized = sanitize_utf8_text(input);
-    std::string out;
-    out.reserve(sanitized.size());
-
-    std::size_t i = 0;
-    while (i < sanitized.size()) {
-        uint32_t cp = 0;
-        std::size_t len = 0;
-        if (!utf8_decode_at_global(sanitized, i, cp, len)) {
-            out.push_back(' ');
-            ++i;
-            continue;
-        }
-
-        if (cp == '\n' || cp == '\r' || cp == '\t' || cp == 0x3000 || cp == 0x00A0) {
-            out.push_back(' ');
-        } else if (rag_is_text_codepoint(cp)) {
-            out.append(sanitized, i, len);
-        } else {
-            out.push_back(' ');
-        }
-        i += len;
-    }
-
-    out = std::regex_replace(out, std::regex("[ ]+"), " ");
-    return trim_copy(out);
-}
-
 static inline bool is_valid_utf8_text(const std::string &input)
 {
     std::size_t i = 0;
@@ -2444,7 +2399,7 @@ static inline void save_rag_cached_text(const InfoStore &store,
                                         const std::string &text)
 {
     fs::create_directories(rag_cache_dir(store));
-    write_text_file(rag_cache_path_for_doc(store, doc_path), normalize_for_rag_retrieval(text));
+    write_text_file(rag_cache_path_for_doc(store, doc_path), text);
 }
 
 static inline std::string load_or_build_rag_cached_text(const InfoStore &store,
@@ -2452,20 +2407,15 @@ static inline std::string load_or_build_rag_cached_text(const InfoStore &store,
 {
     const fs::path cache_path = rag_cache_path_for_doc(store, doc_path);
     if (fs::exists(cache_path)) {
-        std::string cached_raw = trim_copy(read_text_file(cache_path));
-        std::string cached = normalize_for_rag_retrieval(cached_raw);
+        std::string cached = trim_copy(read_text_file(cache_path));
         if (!cached.empty()) {
-            if (cached != cached_raw) {
-                write_text_file(cache_path, cached);
-                RuntimeLogger::info("[RAG][缓存] 已更新归一化内容: doc=" + doc_path.filename().string());
-            }
             RuntimeLogger::debug("[RAG][缓存] 命中: doc=" + doc_path.filename().string());
             return cached;
         }
     }
 
     RuntimeLogger::info("[RAG][缓存] 未命中，开始解析: doc=" + doc_path.filename().string());
-    std::string parsed = normalize_for_rag_retrieval(extract_text_for_rag(doc_path));
+    std::string parsed = extract_text_for_rag(doc_path);
     if (!parsed.empty()) {
         save_rag_cached_text(store, doc_path, parsed);
         RuntimeLogger::info("[RAG][缓存] 已写入: doc=" + doc_path.filename().string() +
@@ -2969,7 +2919,6 @@ inline void register_info_routes(App &app, InfoStore &store, const std::string &
 
             std::string question = trim_copy(body["question"].s());
             if (question.empty()) throw std::runtime_error("question 不能为空");
-            std::string retrieval_question = normalize_for_rag_retrieval(question);
             RuntimeLogger::info("[RAG][问答] 问题已解析: question_len=" + std::to_string(question.size()) +
                                 ", preview=" + RuntimeLogger::preview(question, 80));
 
@@ -2997,7 +2946,7 @@ inline void register_info_routes(App &app, InfoStore &store, const std::string &
                     if (!text.empty()) {
                         RuntimeLogger::debug("[RAG][检索] 文档提取成功: file=" + p.filename().string() +
                                              ", text_len=" + std::to_string(text.size()));
-                        docs.push_back("[文档名]" + original_name_from_rag_file(p) + "\n" + text);
+                        docs.push_back(std::move(text));
                     } else {
                         RuntimeLogger::warn("[RAG][检索] 文档提取为空: file=" + p.filename().string());
                     }
@@ -3026,7 +2975,7 @@ inline void register_info_routes(App &app, InfoStore &store, const std::string &
             RagIndex index;
             int chunks = index.index_documents(docs);
             RuntimeLogger::info("[RAG][检索] 索引完成: chunks=" + std::to_string(chunks));
-            auto contexts = index.retrieve(retrieval_question, cfg.top_k);
+            auto contexts = index.retrieve(question, cfg.top_k);
             RuntimeLogger::info("[RAG][检索] 召回完成: top_k=" + std::to_string(cfg.top_k) +
                                 ", hit=" + std::to_string(contexts.size()));
             std::string answer = llm_chat_completion(cfg, question, contexts);
