@@ -55,10 +55,20 @@ else()
 endif()
 
 # Compiler warnings and sane defaults
+# Source charset: UTF-8 (source files).
+# On Windows with Clang/LLVM, execution charset is already UTF-8 by default;
+# we handle console encoding at runtime via SetConsoleOutputCP(CP_UTF8).
 if(MSVC)
-  target_compile_options(${PROJECT_NAME} PRIVATE /W4 /permissive-)
+  target_compile_options(${PROJECT_NAME} PRIVATE
+    /W4 /permissive-
+    /source-charset:utf-8
+    /execution-charset:utf-8
+  )
 else()
-  target_compile_options(${PROJECT_NAME} PRIVATE -Wall -Wextra -Wpedantic -Wno-unused-parameter)
+  target_compile_options(${PROJECT_NAME} PRIVATE
+    -Wall -Wextra -Wpedantic -Wno-unused-parameter
+    -finput-charset=utf-8
+  )
   if(NOT WIN32)
     find_package(Threads REQUIRED)
     target_link_libraries(${PROJECT_NAME} PRIVATE Threads::Threads)

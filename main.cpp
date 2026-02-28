@@ -2,6 +2,9 @@
 
 #include <crow.h>//如果遇到神秘问题可以尝试不要引入全量crow头文件而是只引入需要的
 #include <thread>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 #include "info_store.h"
 #include "info_api.h"
 #include "request_log_middleware.h"
@@ -9,6 +12,12 @@
 
 int main(int argc, char **argv)
 {
+#ifdef _WIN32
+    // 将Windows控制台输入/输出代码页切换为UTF-8(CP_UTF8=65001)
+    // 与编译器选项 -fexec-charset=utf-8 (或 /execution-charset:utf-8) 保持一致
+    SetConsoleOutputCP(CP_UTF8);
+    SetConsoleCP(CP_UTF8);
+#endif
     std::cout << "======================================" << std::endl;
     std::cout << "| 数据库软件运行后请勿手动修改数据库 |" << std::endl;
     std::cout << "|------------------------------------|" << std::endl;
