@@ -8,9 +8,7 @@
 [ 已修复 ]  [cpp-331c68c] [vue3/cpp] 下载时貌似每次都会再走一次转换流程
 [ 已修复 ]  [cpp-331c68c] [macOS/vue3] macOS下推理成功时仍提示失败（目前已做ui上的优化）
 [ 已修复 ]  [cpp-adef39a] RAG目前是随用随解析，需要改为上传时解析
-
-
-[等待测试]  [cpp-adef39a][与新算法打包时一同验证][cpp/windows] windows平台的RAG没有macOS准确
-[等待测试]  [cpp/windows] windows可能无法编译/功能缺失
-
-[等待修复]  [cpp/windows] windows平台的RAG在上传epub时无法正常解压导致Windows无法使用LLM RAG
+[ 已修复 ]  [cpp-539eba1] [cpp-adef39a][与新算法打包时一同验证][cpp/windows] windows平台的RAG没有macOS准确
+[ 已修复 ]  [cpp-f5efcd8] [cpp/windows] windows可能无法编译/功能缺失
+[ 已修复 ]  [cpp-539eba1] [cpp/windows] windows平台的RAG在上传epub时无法正常解压导致Windows无法使用LLM RAG
+[ 已修复 ]  [vue3-01b281c] 三维模型界面按钮需优化
