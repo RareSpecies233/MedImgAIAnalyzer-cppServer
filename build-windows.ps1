@@ -14,7 +14,8 @@ param(
     [switch]$UseVcpkg = $true,
     [string]$Triplet = "x64-windows",
     [ValidateSet('Release','Debug')][string]$Config = "Release",
-    [switch]$AutoInstallCMake = $false
+    [switch]$AutoInstallCMake = $false,
+    [switch]$OfflineDeps = $true
 )
 
 Set-StrictMode -Version Latest
@@ -110,15 +111,27 @@ $cmakeArgs = @(
     '-S', $PSScriptRoot,
     '-B', $buildDir,
     '-G', $generator,
-    '-DCMAKE_BUILD_TYPE=' + $Config
+    "-DCMAKE_BUILD_TYPE=$Config"
 )
 if ($toolchainArg) { $cmakeArgs += $toolchainArg }
+if ($OfflineDeps) {
+    # Avoid FetchContent git update step for already populated deps (e.g., crow-src)
+    $cmakeArgs += '-DFETCHCONTENT_UPDATES_DISCONNECTED=ON'
+}
 
 Write-Host "Configuring (this may download Crow header)" -ForegroundColor Cyan
 & cmake @cmakeArgs
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "CMake configure failed with exit code $LASTEXITCODE"
+    exit $LASTEXITCODE
+}
 
 Write-Host "Building (config: $Config)" -ForegroundColor Cyan
 & cmake --build $buildDir --config $Config --parallel
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "CMake build failed with exit code $LASTEXITCODE"
+    exit $LASTEXITCODE
+}
 
 $exePath = Join-Path $buildDir 'bin\MedImgAIAnalyzer.exe'
 if (-not (Test-Path $exePath)) {
@@ -127,7 +140,7 @@ if (-not (Test-Path $exePath)) {
 }
 
 if (-not (Test-Path $exePath)) {
-    Write-Error "build succeeded but main.exe not found. Look in: $buildDir"; exit 2
+    Write-Error "build completed but MedImgAIAnalyzer.exe not found. Look in: $buildDir"; exit 2
 }
 
 Write-Host "✅ Built: $exePath" -ForegroundColor Green
