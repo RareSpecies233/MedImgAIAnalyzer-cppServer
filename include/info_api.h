@@ -2258,15 +2258,39 @@ static inline std::string extract_text_from_epub(const fs::path &path)
     try {
         std::string src = powershell_single_quote_escape(path.string());
         std::string dst = powershell_single_quote_escape(temp_dir.string());
-        std::string expand_cmd =
-            "powershell -NoProfile -NonInteractive -Command \"Expand-Archive -LiteralPath '" +
-            src +
-            "' -DestinationPath '" +
-            dst +
-            "' -Force\"";
+        int extract_exit = -1;
+        std::string extract_output;
 
-        auto expand_out = run_command_capture(expand_cmd);
-        if (expand_out.exit_code != 0) {
+        if (command_exists("7z")) {
+            std::string extract_cmd =
+                "powershell -NoProfile -NonInteractive -Command \""
+                "$ErrorActionPreference='Stop'; "
+                "$src='" + src + "'; "
+                "$dst='" + dst + "'; "
+                "if (!(Test-Path -LiteralPath $dst)) { New-Item -ItemType Directory -Path $dst -Force | Out-Null }; "
+                "& 7z x -y ('-o' + $dst) -- $src * | Out-Null\"";
+            auto extract_out = run_command_capture(extract_cmd);
+            extract_exit = extract_out.exit_code;
+            extract_output = extract_out.output;
+        }
+
+        if (extract_exit != 0) {
+            std::string extract_cmd =
+                "powershell -NoProfile -NonInteractive -Command \""
+                "$ErrorActionPreference='Stop'; "
+                "Add-Type -AssemblyName System.IO.Compression.FileSystem; "
+                "$src='" + src + "'; "
+                "$dst='" + dst + "'; "
+                "if (Test-Path -LiteralPath $dst) { Remove-Item -LiteralPath $dst -Recurse -Force }; "
+                "New-Item -ItemType Directory -Path $dst -Force | Out-Null; "
+                "[System.IO.Compression.ZipFile]::ExtractToDirectory($src, $dst)\"";
+            auto extract_out = run_command_capture(extract_cmd);
+            extract_exit = extract_out.exit_code;
+            extract_output = extract_out.output;
+        }
+
+        if (extract_exit != 0) {
+            RuntimeLogger::error("[RAG][EPUB] Windows解压失败: " + trim_copy(extract_output));
             cleanup();
             throw std::runtime_error("EPUB 解压失败");
         }
