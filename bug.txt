@@ -13,3 +13,8 @@
 [等待测试]  [cpp-adef39a][与新算法打包时一同验证][cpp/windows] windows平台的RAG没有macOS准确
 [等待测试]  [cpp/windows] windows可能无法编译/功能缺失
 
+[等待修复]  [cpp/windows] windows平台的RAG在上传epub时无法正常解压导致Windows无法使用LLM RAG
+[等待修复]  [cpp/windows] windows平台推理时onnx会报错
+
+
+
