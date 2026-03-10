@@ -12,3 +12,5 @@
 [ 已修复 ]  [cpp-f5efcd8] [cpp/windows] windows可能无法编译/功能缺失
 [ 已修复 ]  [cpp-539eba1] [cpp/windows] windows平台的RAG在上传epub时无法正常解压导致Windows无法使用LLM RAG
 [ 已修复 ]  [vue3-01b281c] 三维模型界面按钮需优化
+
+log中有特殊字符，需要过滤/去除
