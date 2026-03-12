@@ -34,6 +34,7 @@
 #include <onnxruntime/onnxruntime_cxx_api.h>
 #include "cnpy.h"
 #include "info_store.h"
+#include "npz_enhance_utils.h"
 #include "npz_to_glb.h"
 #include "runtime_logger.h"
 
@@ -97,6 +98,71 @@ static std::optional<int> extract_int_field(const std::string &body, const std::
     }
     if (neg) val = -val;
     return static_cast<int>(val);
+}
+
+static std::optional<double> extract_double_field(const std::string &body, const std::string &key) {
+    std::string k = '"' + key + '"';
+    auto pos = body.find(k);
+    if (pos == std::string::npos) return std::nullopt;
+    pos = body.find(':', pos + k.size());
+    if (pos == std::string::npos) return std::nullopt;
+    ++pos;
+    while (pos < body.size() && std::isspace(static_cast<unsigned char>(body[pos]))) ++pos;
+
+    size_t end = pos;
+    if (end < body.size() && (body[end] == '-' || body[end] == '+')) ++end;
+    bool has_digit = false;
+    bool has_dot = false;
+    while (end < body.size()) {
+        const char ch = body[end];
+        if (std::isdigit(static_cast<unsigned char>(ch))) {
+            has_digit = true;
+            ++end;
+            continue;
+        }
+        if (ch == '.' && !has_dot) {
+            has_dot = true;
+            ++end;
+            continue;
+        }
+        if ((ch == 'e' || ch == 'E') && has_digit) {
+            ++end;
+            if (end < body.size() && (body[end] == '+' || body[end] == '-')) ++end;
+            while (end < body.size() && std::isdigit(static_cast<unsigned char>(body[end]))) ++end;
+            break;
+        }
+        break;
+    }
+    if (!has_digit) return std::nullopt;
+    try {
+        return std::stod(body.substr(pos, end - pos));
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+static std::optional<bool> extract_bool_field(const std::string &body, const std::string &key) {
+    std::string k = '"' + key + '"';
+    auto pos = body.find(k);
+    if (pos == std::string::npos) return std::nullopt;
+    pos = body.find(':', pos + k.size());
+    if (pos == std::string::npos) return std::nullopt;
+    ++pos;
+    while (pos < body.size() && std::isspace(static_cast<unsigned char>(body[pos]))) ++pos;
+    if (body.compare(pos, 4, "true") == 0) return true;
+    if (body.compare(pos, 5, "false") == 0) return false;
+    return std::nullopt;
+}
+
+static inline std::string json_filename_array(const std::vector<fs::path> &files)
+{
+    std::string body = "[";
+    for (size_t i = 0; i < files.size(); ++i) {
+        body += "\"" + files[i].filename().string() + "\"";
+        if (i + 1 < files.size()) body += ",";
+    }
+    body += "]";
+    return body;
 }
 
 static inline std::string read_text_file(const fs::path &path)
@@ -3746,6 +3812,173 @@ inline void register_info_routes(App &app, InfoStore &store, const std::string &
         }
     });
 
+    // 开始高级数据增强
+    CROW_ROUTE(app, "/api/project/<string>/start_enhdb").methods(crow::HTTPMethod::POST)([&store](const crow::request &req, const std::string &uuid){
+        try {
+            RuntimeLogger::info("[高级增强] 开始: uuid=" + uuid);
+            if (!store.exists(uuid)) throw std::runtime_error("project not found");
+
+            auto lookup_double = [&](std::initializer_list<const char*> keys, double fallback) {
+                for (const char* key : keys) {
+                    auto value = extract_double_field(req.body, key);
+                    if (value.has_value()) return *value;
+                }
+                return fallback;
+            };
+            auto lookup_int = [&](std::initializer_list<const char*> keys) -> std::optional<int> {
+                for (const char* key : keys) {
+                    auto value = extract_int_field(req.body, key);
+                    if (value.has_value()) return value;
+                }
+                return std::nullopt;
+            };
+            auto lookup_bool = [&](std::initializer_list<const char*> keys, bool fallback) {
+                for (const char* key : keys) {
+                    auto value = extract_bool_field(req.body, key);
+                    if (value.has_value()) return *value;
+                }
+                return fallback;
+            };
+
+            npzproc::Args args;
+            args.scale_x = lookup_double({"scale-x", "scale_x", "scaleX"}, 1.0);
+            args.scale_y = lookup_double({"scale-y", "scale_y", "scaleY"}, 1.0);
+            args.rotate_deg = lookup_double({"rotate", "rotate_deg", "rotateDeg"}, 0.0);
+            args.contrast = lookup_double({"contrast"}, 1.0);
+            args.gamma = lookup_double({"gamma"}, 1.0);
+            args.preserve_resolution = lookup_bool({"preserve-resolution", "preserve_resolution", "preserveResolution"}, false);
+
+            const auto crop_x = lookup_int({"crop-x", "crop_x", "cropX"});
+            const auto crop_y = lookup_int({"crop-y", "crop_y", "cropY"});
+            const auto crop_w = lookup_int({"crop-w", "crop_w", "cropW"});
+            const auto crop_h = lookup_int({"crop-h", "crop_h", "cropH"});
+            const bool has_any_crop = crop_x.has_value() || crop_y.has_value() || crop_w.has_value() || crop_h.has_value();
+            const bool has_full_crop = crop_x.has_value() && crop_y.has_value() && crop_w.has_value() && crop_h.has_value();
+            if (has_any_crop && !has_full_crop) {
+                throw std::runtime_error("crop 参数需要同时提供 x/y/w/h");
+            }
+            if (has_full_crop) {
+                args.crop = npzproc::CropRect{*crop_x, *crop_y, *crop_w, *crop_h};
+            }
+
+            fs::path project_dir = store.base_path / uuid;
+            fs::path input_npz_dir = project_dir / "npz";
+            auto files = list_files(input_npz_dir);
+            if (files.empty()) {
+                throw std::runtime_error("npz为空");
+            }
+
+            fs::path enh_dir = project_dir / "enhDBprocessed";
+            fs::path enh_npz_dir = enh_dir / "npzs";
+            fs::path enh_png_dir = enh_dir / "pngs";
+            fs::path enh_marked_dir = enh_dir / "markedpngs";
+            std::error_code ec;
+            fs::remove_all(enh_dir, ec);
+            fs::create_directories(enh_npz_dir);
+            fs::create_directories(enh_png_dir);
+            fs::create_directories(enh_marked_dir);
+            RuntimeLogger::info("[高级增强] 已重置输出目录: " + enh_dir.string());
+            RuntimeLogger::info("[高级增强] 参数: scale_x=" + std::to_string(args.scale_x) +
+                                ", scale_y=" + std::to_string(args.scale_y) +
+                                ", rotate=" + std::to_string(args.rotate_deg) +
+                                ", contrast=" + std::to_string(args.contrast) +
+                                ", gamma=" + std::to_string(args.gamma) +
+                                ", preserve_resolution=" + std::string(args.preserve_resolution ? "true" : "false"));
+
+            size_t processed_count = 0;
+            for (const auto &src : files) {
+                if (to_lower_copy(src.extension().string()) != ".npz") continue;
+                npzproc::Args file_args = args;
+                file_args.input = src;
+                file_args.output = enh_npz_dir / src.filename();
+                RuntimeLogger::info("[高级增强] 处理文件: " + src.filename().string());
+                npzproc::process_npz_file(file_args);
+                convert_npz_to_pngs(file_args.output, enh_png_dir, enh_marked_dir, true, true, "_marked");
+                RuntimeLogger::info("[高级增强] 输出完成: " + file_args.output.filename().string());
+                ++processed_count;
+            }
+
+            if (processed_count == 0) {
+                throw std::runtime_error("npz目录中没有可处理的 npz 文件");
+            }
+
+            crow::json::wvalue res;
+            res["status"] = "ok";
+            res["processed"] = static_cast<int>(processed_count);
+            crow::response r{res};
+            r.code = 200; set_json_headers(r); return r;
+        } catch (const std::exception &e) {
+            crow::response r{std::string("{\"error\":\"") + e.what() + "\"}"};
+            r.code = 400; set_json_headers(r); return r;
+        }
+    });
+
+    // 获取高级增强 png 列表
+    CROW_ROUTE(app, "/api/project/<string>/enhdb/png").methods(crow::HTTPMethod::GET)([&store](const std::string &uuid){
+        try {
+            if (!store.exists(uuid)) throw std::runtime_error("project not found");
+            fs::path png_dir = store.base_path / uuid / "enhDBprocessed" / "pngs";
+            crow::response r{json_filename_array(list_files(png_dir))};
+            r.code = 200; set_json_headers(r); return r;
+        } catch (const std::exception &e) {
+            crow::response r{std::string("{\"error\":\"") + e.what() + "\"}"};
+            r.code = 400; set_json_headers(r); return r;
+        }
+    });
+
+    // 获取单张高级增强 png
+    CROW_ROUTE(app, "/api/project/<string>/enhdb/png/<string>").methods(crow::HTTPMethod::GET)([&store](const std::string &uuid, const std::string &filename){
+        try {
+            if (!store.exists(uuid)) throw std::runtime_error("project not found");
+            if (filename.find("..") != std::string::npos || filename.find('/') != std::string::npos || filename.find('\\') != std::string::npos) {
+                throw std::runtime_error("invalid filename");
+            }
+            fs::path png_path = store.base_path / uuid / "enhDBprocessed" / "pngs" / filename;
+            if (!fs::exists(png_path)) throw std::runtime_error("enhdb png not found");
+            crow::response r{read_text_file(png_path)};
+            r.set_header("Content-Type", "image/png");
+            r.set_header("Access-Control-Allow-Origin", "*");
+            r.code = 200;
+            return r;
+        } catch (const std::exception &e) {
+            crow::response r{std::string("{\"error\":\"") + e.what() + "\"}"};
+            r.code = 400; set_json_headers(r); return r;
+        }
+    });
+
+    // 获取高级增强 markedpng 列表
+    CROW_ROUTE(app, "/api/project/<string>/enhdb/markedpng").methods(crow::HTTPMethod::GET)([&store](const std::string &uuid){
+        try {
+            if (!store.exists(uuid)) throw std::runtime_error("project not found");
+            fs::path dir = store.base_path / uuid / "enhDBprocessed" / "markedpngs";
+            crow::response r{json_filename_array(list_files(dir))};
+            r.code = 200; set_json_headers(r); return r;
+        } catch (const std::exception &e) {
+            crow::response r{std::string("{\"error\":\"") + e.what() + "\"}"};
+            r.code = 400; set_json_headers(r); return r;
+        }
+    });
+
+    // 获取单张高级增强 markedpng
+    CROW_ROUTE(app, "/api/project/<string>/enhdb/markedpng/<string>").methods(crow::HTTPMethod::GET)([&store](const std::string &uuid, const std::string &filename){
+        try {
+            if (!store.exists(uuid)) throw std::runtime_error("project not found");
+            if (filename.find("..") != std::string::npos || filename.find('/') != std::string::npos || filename.find('\\') != std::string::npos) {
+                throw std::runtime_error("invalid filename");
+            }
+            fs::path png_path = store.base_path / uuid / "enhDBprocessed" / "markedpngs" / filename;
+            if (!fs::exists(png_path)) throw std::runtime_error("enhdb markedpng not found");
+            crow::response r{read_text_file(png_path)};
+            r.set_header("Content-Type", "image/png");
+            r.set_header("Access-Control-Allow-Origin", "*");
+            r.code = 200;
+            return r;
+        } catch (const std::exception &e) {
+            crow::response r{std::string("{\"error\":\"") + e.what() + "\"}"};
+            r.code = 400; set_json_headers(r); return r;
+        }
+    });
+
     // 获取 png 列表
     CROW_ROUTE(app, "/api/project/<string>/png").methods(crow::HTTPMethod::GET)([&store](const std::string &uuid){
         try {
@@ -4121,6 +4354,121 @@ inline void register_info_routes(App &app, InfoStore &store, const std::string &
             crow::response r{read_text_file(zip_path)};
             r.set_header("Content-Type", "application/zip");
             r.set_header("Content-Disposition", "attachment; filename=\"processed_nii.zip\"");
+            return r;
+        } catch (const std::exception &e) {
+            crow::response r{std::string("{\"error\":\"") + e.what() + "\"}"};
+            r.code = 400; set_json_headers(r); return r;
+        }
+    });
+
+    // 下载高级增强 png
+    CROW_ROUTE(app, "/api/project/<string>/download/enhdb/png").methods(crow::HTTPMethod::GET)([&store](const std::string &uuid){
+        try {
+            RuntimeLogger::info("[下载] 请求高级增强 PNG 压缩包: uuid=" + uuid);
+            if (!store.exists(uuid)) throw std::runtime_error("project not found");
+            fs::path dir = store.base_path / uuid / "enhDBprocessed" / "pngs";
+            auto zip_path = create_zip_store(dir, uuid + "_enhdb_png.zip");
+            crow::response r{read_text_file(zip_path)};
+            r.set_header("Content-Type", "application/zip");
+            r.set_header("Content-Disposition", "attachment; filename=\"enhdb_png.zip\"");
+            return r;
+        } catch (const std::exception &e) {
+            crow::response r{std::string("{\"error\":\"") + e.what() + "\"}"};
+            r.code = 400; set_json_headers(r); return r;
+        }
+    });
+
+    CROW_ROUTE(app, "/api/project/<string>/download/enhdb/markedpng").methods(crow::HTTPMethod::GET)([&store](const std::string &uuid){
+        try {
+            RuntimeLogger::info("[下载] 请求高级增强 markedPNG 压缩包: uuid=" + uuid);
+            if (!store.exists(uuid)) throw std::runtime_error("project not found");
+            fs::path dir = store.base_path / uuid / "enhDBprocessed" / "markedpngs";
+            auto zip_path = create_zip_store(dir, uuid + "_enhdb_markedpng.zip");
+            crow::response r{read_text_file(zip_path)};
+            r.set_header("Content-Type", "application/zip");
+            r.set_header("Content-Disposition", "attachment; filename=\"enhdb_markedpng.zip\"");
+            return r;
+        } catch (const std::exception &e) {
+            crow::response r{std::string("{\"error\":\"") + e.what() + "\"}"};
+            r.code = 400; set_json_headers(r); return r;
+        }
+    });
+
+    CROW_ROUTE(app, "/api/project/<string>/download/enhdb/fused/png").methods(crow::HTTPMethod::GET)([&store](const std::string &uuid){
+        fs::path fused_dir;
+        try {
+            RuntimeLogger::info("[下载] 请求高级增强 PNG 与 markedPNG 融合压缩包: uuid=" + uuid);
+            if (!store.exists(uuid)) throw std::runtime_error("project not found");
+            fs::path project_dir = store.base_path / uuid;
+            fused_dir = build_fused_png_temp_dir(project_dir / "enhDBprocessed" / "pngs",
+                                                project_dir / "enhDBprocessed" / "markedpngs",
+                                                uuid + "_enhdb_fused_png");
+            auto zip_path = create_zip_store(fused_dir, uuid + "_enhdb_fused_png.zip");
+            crow::response r{read_text_file(zip_path)};
+            r.set_header("Content-Type", "application/zip");
+            r.set_header("Content-Disposition", "attachment; filename=\"enhdb_png_markedpng_fused.zip\"");
+            std::error_code ec;
+            fs::remove_all(fused_dir, ec);
+            return r;
+        } catch (const std::exception &e) {
+            std::error_code ec;
+            if (!fused_dir.empty()) fs::remove_all(fused_dir, ec);
+            crow::response r{std::string("{\"error\":\"") + e.what() + "\"}"};
+            r.code = 400; set_json_headers(r); return r;
+        }
+    });
+
+    CROW_ROUTE(app, "/api/project/<string>/download/enhdb/npz").methods(crow::HTTPMethod::GET)([&store](const std::string &uuid){
+        try {
+            RuntimeLogger::info("[下载] 请求高级增强 NPZ 压缩包: uuid=" + uuid);
+            if (!store.exists(uuid)) throw std::runtime_error("project not found");
+            fs::path dir = store.base_path / uuid / "enhDBprocessed" / "npzs";
+            auto zip_path = create_zip_store(dir, uuid + "_enhdb_npz.zip");
+            crow::response r{read_text_file(zip_path)};
+            r.set_header("Content-Type", "application/zip");
+            r.set_header("Content-Disposition", "attachment; filename=\"enhdb_npz.zip\"");
+            return r;
+        } catch (const std::exception &e) {
+            crow::response r{std::string("{\"error\":\"") + e.what() + "\"}"};
+            r.code = 400; set_json_headers(r); return r;
+        }
+    });
+
+    CROW_ROUTE(app, "/api/project/<string>/download/enhdb/dcm").methods(crow::HTTPMethod::GET)([&store](const std::string &uuid){
+        try {
+            RuntimeLogger::info("[下载] 请求高级增强 DCM 压缩包: uuid=" + uuid);
+            if (!store.exists(uuid)) throw std::runtime_error("project not found");
+            fs::path project_dir = store.base_path / uuid;
+            fs::path dir = project_dir / "enhDBprocessed" / "dcm";
+            if (list_files(dir).empty()) {
+                RuntimeLogger::info("[下载触发转换] [npz转dcm] 高级增强目录为空，开始按需转换: uuid=" + uuid);
+                ensure_converted_from_npz_dir(project_dir / "enhDBprocessed" / "npzs", dir, "dcm", "image");
+            }
+            auto zip_path = create_zip_store(dir, uuid + "_enhdb_dcm.zip");
+            crow::response r{read_text_file(zip_path)};
+            r.set_header("Content-Type", "application/zip");
+            r.set_header("Content-Disposition", "attachment; filename=\"enhdb_dcm.zip\"");
+            return r;
+        } catch (const std::exception &e) {
+            crow::response r{std::string("{\"error\":\"") + e.what() + "\"}"};
+            r.code = 400; set_json_headers(r); return r;
+        }
+    });
+
+    CROW_ROUTE(app, "/api/project/<string>/download/enhdb/nii").methods(crow::HTTPMethod::GET)([&store](const std::string &uuid){
+        try {
+            RuntimeLogger::info("[下载] 请求高级增强 NII 压缩包: uuid=" + uuid);
+            if (!store.exists(uuid)) throw std::runtime_error("project not found");
+            fs::path project_dir = store.base_path / uuid;
+            fs::path dir = project_dir / "enhDBprocessed" / "nii";
+            if (list_files(dir).empty()) {
+                RuntimeLogger::info("[下载触发转换] [npz转nii] 高级增强目录为空，开始按需转换: uuid=" + uuid);
+                ensure_converted_from_npz_dir(project_dir / "enhDBprocessed" / "npzs", dir, "nii", "image");
+            }
+            auto zip_path = create_zip_store(dir, uuid + "_enhdb_nii.zip");
+            crow::response r{read_text_file(zip_path)};
+            r.set_header("Content-Type", "application/zip");
+            r.set_header("Content-Disposition", "attachment; filename=\"enhdb_nii.zip\"");
             return r;
         } catch (const std::exception &e) {
             crow::response r{std::string("{\"error\":\"") + e.what() + "\"}"};

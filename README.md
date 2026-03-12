@@ -1,6 +1,6 @@
 # MedImgAIAnalyzer C++ 后端
 
-这是一个基于 Crow 的医学影像后端服务，负责项目管理、医学影像格式转换、PNG/标注图输出、ONNX 推理、3D 模型生成，以及全局/项目级 LLM RAG 能力。
+这是一个基于 Crow 的医学影像后端服务，负责项目管理、医学影像格式转换、PNG/标注图输出、ONNX 推理、高级数据增强、3D 模型生成，以及全局/项目级 LLM RAG 能力。
 
 ## 当前能力
 
@@ -9,6 +9,7 @@
 - 原始 png、markedpng、处理后标注图的列表与单图访问
 - png、markedpng、处理后标注图、融合图、npz、dcm、nii 的 ZIP 下载
 - ONNX 推理与处理结果输出到 processed 目录
+- 项目级 NPZ 高级数据增强，结果输出到 enhDBprocessed 目录
 - 3D 模型生成与下载
 - 全局 LLM 配置、全局 RAG 文档管理
 - 项目级临时 RAG 文档、项目级问答、项目级历史对话
@@ -44,6 +45,12 @@ db/
    │  ├─ npzs/                  # 推理结果 NPZ
    │  ├─ dcm/                   # 按需生成的处理后 DCM
    │  └─ nii/                   # 按需生成的处理后 NII
+   ├─ enhDBprocessed/
+   │  ├─ npzs/                  # 高级增强后的 NPZ
+   │  ├─ pngs/                  # 高级增强后的普通 PNG
+   │  ├─ markedpngs/            # 高级增强后的透明标注 PNG
+   │  ├─ dcm/                   # 按需生成的高级增强 DCM
+   │  └─ nii/                   # 按需生成的高级增强 NII
    ├─ 3d/                       # 处理后 3D 模型
    ├─ OG3d/                     # 原始 3D 模型（markednpz 场景）
    ├─ llmdoc/                   # 当前项目临时 RAG 文档
@@ -55,7 +62,18 @@ db/
 - `png/` 存放原始灰度图或普通 PNG
 - `markedpng/` 存放初始化阶段导出的透明标注图
 - `processed/pngs/` 当前实现中存放处理后的透明标注图
+- `enhDBprocessed/pngs/` 存放高级增强后的普通 PNG
+- `enhDBprocessed/markedpngs/` 存放高级增强后的透明标注图
 - 融合图不持久化落盘，下载时由后端临时把基础 png 与透明标注图进行 alpha 融合，再打包返回
+
+## 高级数据增强说明
+
+- 入口接口为 `POST /api/project/{uuid}/start_enhdb`
+- 输入来源固定为 `db/{uuid}/npz/` 中的项目级 NPZ 文件
+- 增强结果固定输出到 `db/{uuid}/enhDBprocessed/`
+- 当前支持的增强参数与独立 `cppnpzprocess` 工具保持一致：缩放、旋转、裁切、对比度、伽马、恢复原始分辨率
+- 当 NPZ 中存在 `label` 键时，几何变换会同步作用到 `label`，保证和 `image` 的空间对应关系不变
+- 增强完成后可继续通过现有风格的接口获取普通 PNG、标注 PNG、融合 PNG、NPZ、DCM、NII
 
 ## LLM / RAG 说明
 

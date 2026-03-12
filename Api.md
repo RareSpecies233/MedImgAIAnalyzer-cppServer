@@ -172,6 +172,69 @@
 - 方法：GET /api/project/{uuid}/download/processed/nii
 - 返回：ZIP（存储模式）
 
+16.1) 开始高级数据增强
+- 方法：POST /api/project/{uuid}/start_enhdb
+- 请求体：可包含以下字段
+	- `scale-x` / `scale_x` / `scaleX`: float，X 方向缩放倍率，默认 `1.0`
+	- `scale-y` / `scale_y` / `scaleY`: float，Y 方向缩放倍率，默认 `1.0`
+	- `rotate` / `rotate_deg` / `rotateDeg`: float，逆时针旋转角度，默认 `0`
+	- `crop-x` / `crop_x` / `cropX`: int，裁切左上角 X
+	- `crop-y` / `crop_y` / `cropY`: int，裁切左上角 Y
+	- `crop-w` / `crop_w` / `cropW`: int，裁切宽度
+	- `crop-h` / `crop_h` / `cropH`: int，裁切高度
+	- `contrast`: float，对比度倍率，默认 `1.0`
+	- `gamma`: float，伽马值，默认 `1.0`，必须大于 `0`
+	- `preserve-resolution` / `preserve_resolution` / `preserveResolution`: bool，处理后是否恢复到输入原始分辨率，默认 `false`
+- 说明：
+	- 输入固定读取 `db/{uuid}/npz/`
+	- 输出固定写入 `db/{uuid}/enhDBprocessed/npzs`
+	- 如果原始 NPZ 中存在 `label` 键，缩放、旋转、裁切会同步应用到 `label`
+	- 若同时需要裁切，必须完整提供 `crop-x/crop-y/crop-w/crop-h` 四个参数
+- 返回：200，`{ "status": "ok", "processed": <count> }`
+
+16.2) 获取高级增强 png 列表
+- 方法：GET /api/project/{uuid}/enhdb/png
+- 返回：200，PNG 文件名数组
+
+16.3) 获取单张高级增强 png
+- 方法：GET /api/project/{uuid}/enhdb/png/{filename}
+- 返回：200，PNG 文件（二进制）
+
+16.4) 获取高级增强 markedpng 列表
+- 方法：GET /api/project/{uuid}/enhdb/markedpng
+- 返回：200，markedpng 文件名数组
+
+16.5) 获取单张高级增强 markedpng
+- 方法：GET /api/project/{uuid}/enhdb/markedpng/{filename}
+- 返回：200，markedpng 文件（二进制）
+
+16.6) 下载高级增强 png
+- 方法：GET /api/project/{uuid}/download/enhdb/png
+- 返回：ZIP（二进制）
+
+16.7) 下载高级增强 markedpng
+- 方法：GET /api/project/{uuid}/download/enhdb/markedpng
+- 返回：ZIP（二进制）
+
+16.8) 下载高级增强 png + markedpng 融合图
+- 方法：GET /api/project/{uuid}/download/enhdb/fused/png
+- 说明：以后端临时融合 `db/{uuid}/enhDBprocessed/pngs` 与 `db/{uuid}/enhDBprocessed/markedpngs` 后再打包返回
+- 返回：ZIP（二进制）
+
+16.9) 下载高级增强 npz
+- 方法：GET /api/project/{uuid}/download/enhdb/npz
+- 返回：ZIP（二进制）
+
+16.10) 下载高级增强 dcm
+- 方法：GET /api/project/{uuid}/download/enhdb/dcm
+- 说明：当 `db/{uuid}/enhDBprocessed/dcm` 为空时，会基于 `db/{uuid}/enhDBprocessed/npzs` 按需转换生成
+- 返回：ZIP（二进制）
+
+16.11) 下载高级增强 nii
+- 方法：GET /api/project/{uuid}/download/enhdb/nii
+- 说明：当 `db/{uuid}/enhDBprocessed/nii` 为空时，会基于 `db/{uuid}/enhDBprocessed/npzs` 按需转换生成
+- 返回：ZIP（二进制）
+
 17) 转换为 3d 模型
 - 方法：POST /api/project/{uuid}/to_3d_model
 - 说明：使用 `db/{uuid}/processed/npzs` 生成 3d 模型，保存到 `db/{uuid}/3d`
@@ -268,6 +331,7 @@
 ## 磁盘存储布局
 - `db/info.json` — 单一 JSON 数组文件，包含所有项目对象（首次运行时自动创建）。
 - `db/{uuid}/project.json` — 项目创建时生成，记录项目处理相关状态。
+- `db/{uuid}/enhDBprocessed/` — 高级数据增强输出目录，包含增强后的 `npzs/`、`pngs/`、`markedpngs/` 以及按需生成的 `dcm/`、`nii/`。
 - `db/llm.json` — 大模型配置（`base_url`、`api_key`、`model`、`temperature`、`top_k`、`system_prompt`）。
 - `db/llmdb/` — RAG 文档目录（上传的文本/PDF等文档持久化存储）。
 - `db/{uuid}/llmdoc/` — 当前项目临时 RAG 文档目录，以及上传后即时生成的解析 `.json` 文件。
