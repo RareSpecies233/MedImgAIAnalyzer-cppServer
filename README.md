@@ -27,6 +27,8 @@ db/
    ├─ temp/             # 临时文件缓存
    ├─ 3d/               # 推理后生成的3d模型
    ├─ OG3d/             # 推理后生成的3d模型（原始）
+   ├─ llmdoc/           # 当前项目临时 RAG 文档
+   ├─ llm_history.json  # 当前项目的 LLM/RAG 历史对话
    ├─ pngs/
    ├─ npzs/
    ├─ dcms/
@@ -39,3 +41,11 @@ db/
    │  └─ project.json   # 存储了当前project的所有状态的json
    └ info.json          # 存储了当前database的所有project的json
 ```
+
+项目级 LLM / RAG 说明
+
+- 全局 RAG 文档仍然保存在 `db/llmdb/`。
+- 某个项目临时上传的 RAG 文档保存在 `db/{uuid}/llmdoc/`。
+- 上传到 `db/{uuid}/llmdoc/` 的文档会在上传后立即解析，并在同目录生成同名 `.json` 解析结果。
+- 项目级问答接口会同时检索全局 RAG 文档与当前项目 `llmdoc/` 中的文档，不会使用其他项目的 `llmdoc/` 文档。
+- 项目级历史对话保存在 `db/{uuid}/llm_history.json`。

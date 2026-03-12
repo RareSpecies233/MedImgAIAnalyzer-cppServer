@@ -13,6 +13,18 @@ struct RequestLogMiddleware {
         std::chrono::steady_clock::time_point start;
     };
 
+    static bool should_log_body_preview(const crow::request &req)
+    {
+        const std::string content_type = req.get_header_value("Content-Type");
+        if (content_type.find("multipart/form-data") != std::string::npos) return false;
+        if (content_type.find("application/octet-stream") != std::string::npos) return false;
+        if (content_type.find("application/zip") != std::string::npos) return false;
+        if (content_type.find("image/") != std::string::npos) return false;
+        if (content_type.find("model/") != std::string::npos) return false;
+        if (content_type.find("application/pdf") != std::string::npos) return false;
+        return !RuntimeLogger::is_binary_like(req.body);
+    }
+
     static std::string method_name(crow::HTTPMethod method)
     {
         switch (method) {
@@ -39,8 +51,11 @@ struct RequestLogMiddleware {
             << " body_bytes=" << req.body.size();
         RuntimeLogger::info(oss.str());
 
-        if (!req.body.empty()) {
+        if (!req.body.empty() && should_log_body_preview(req)) {
             RuntimeLogger::debug("[REQ#" + std::to_string(ctx.request_id) + "] body=" + RuntimeLogger::preview(req.body));
+        } else if (!req.body.empty()) {
+            RuntimeLogger::debug("[REQ#" + std::to_string(ctx.request_id) + "] body=" +
+                                 RuntimeLogger::preview(req.body));
         }
     }
 

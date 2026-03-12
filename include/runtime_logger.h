@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cctype>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
@@ -69,12 +70,45 @@ public:
     static void warn(const std::string &msg) { instance().write_line("WARN", msg); }
     static void error(const std::string &msg) { instance().write_line("ERROR", msg); }
 
+    static bool is_binary_like(const std::string &text, std::size_t sample_len = 512)
+    {
+        if (text.empty()) {
+            return false;
+        }
+
+        const std::size_t limit = std::min(sample_len, text.size());
+        std::size_t suspicious = 0;
+        for (std::size_t i = 0; i < limit; ++i) {
+            const unsigned char ch = static_cast<unsigned char>(text[i]);
+            if (ch == 0 || ch == 0x7F || (ch < 0x20 && ch != '\n' && ch != '\r' && ch != '\t')) {
+                ++suspicious;
+            }
+        }
+
+        return suspicious > 0 && suspicious * 20 >= limit;
+    }
+
     static std::string preview(const std::string &text, std::size_t max_len = 240)
     {
-        std::string out = text;
-        std::replace(out.begin(), out.end(), '\n', ' ');
-        std::replace(out.begin(), out.end(), '\r', ' ');
-        std::replace(out.begin(), out.end(), '\t', ' ');
+        if (is_binary_like(text)) {
+            return "[binary body omitted, bytes=" + std::to_string(text.size()) + "]";
+        }
+
+        std::string out;
+        out.reserve(std::min(max_len, text.size()) + 16);
+        for (unsigned char ch : text) {
+            if (ch == '\n' || ch == '\r' || ch == '\t') {
+                out.push_back(' ');
+            } else if (ch < 0x20 || ch == 0x7F) {
+                out.push_back(' ');
+            } else {
+                out.push_back(static_cast<char>(ch));
+            }
+            if (out.size() >= max_len) {
+                break;
+            }
+        }
+
         if (out.size() <= max_len) {
             return out;
         }

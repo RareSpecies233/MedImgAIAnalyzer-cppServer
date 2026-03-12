@@ -2399,6 +2399,27 @@ static inline fs::path rag_db_dir(const InfoStore &store)
     return store.base_path / "llmdb";
 }
 
+static inline LlmSettings load_llm_settings(const InfoStore &store);
+static inline std::vector<fs::path> list_rag_docs_for_index(const InfoStore &store);
+static inline std::string llm_chat_completion(const LlmSettings &settings,
+                                              const std::string &question,
+                                              const std::vector<std::string> &contexts);
+
+static inline fs::path project_llm_doc_dir(const InfoStore &store, const std::string &uuid)
+{
+    return store.base_path / uuid / "llmdoc";
+}
+
+static inline fs::path project_llm_history_path(const InfoStore &store, const std::string &uuid)
+{
+    return store.base_path / uuid / "llm_history.json";
+}
+
+static inline fs::path project_llm_parsed_json_path(const fs::path &doc_path)
+{
+    return doc_path.parent_path() / (doc_path.stem().string() + ".json");
+}
+
 static inline fs::path rag_cache_dir(const InfoStore &store)
 {
     return rag_db_dir(store) / "__cache__";
@@ -2451,6 +2472,261 @@ static inline std::string load_or_build_rag_cached_text(const InfoStore &store,
 static inline fs::path llm_settings_path(const InfoStore &store)
 {
     return store.base_path / "llm.json";
+}
+
+static inline std::vector<fs::path> list_project_rag_source_docs(const InfoStore &store, const std::string &uuid)
+{
+    fs::path dir = project_llm_doc_dir(store, uuid);
+    std::vector<fs::path> files;
+    if (!fs::exists(dir)) return files;
+    for (auto &p : fs::directory_iterator(dir)) {
+        if (!p.is_regular_file()) continue;
+        if (to_lower_copy(p.path().extension().string()) == ".json") continue;
+        files.push_back(p.path());
+    }
+    std::sort(files.begin(), files.end());
+    return files;
+}
+
+static inline std::string build_project_rag_parsed_json(const std::string &file_name,
+                                                        const std::string &text)
+{
+    std::ostringstream ss;
+    ss << "{\n";
+    ss << "  \"name\": \"" << json_escape(file_name) << "\",\n";
+    ss << "  \"parsed_at\": \"" << now_iso8601_utc() << "\",\n";
+    ss << "  \"text\": \"" << json_escape(text) << "\"\n";
+    ss << "}\n";
+    return ss.str();
+}
+
+static inline std::string load_project_rag_parsed_text(const fs::path &json_path)
+{
+    if (!fs::exists(json_path)) {
+        return {};
+    }
+
+    auto body = crow::json::load(read_text_file(json_path));
+    if (!body || !body.has("text") || body["text"].t() != crow::json::type::String) {
+        return {};
+    }
+    return trim_copy(body["text"].s());
+}
+
+static inline std::string parse_and_store_project_rag_doc(const InfoStore &store,
+                                                          const std::string &uuid,
+                                                          const fs::path &doc_path)
+{
+    if (!rag_is_supported_file(doc_path)) {
+        throw std::runtime_error("不支持的 RAG 文档类型");
+    }
+
+    const std::string parsed = extract_text_for_rag(doc_path);
+    const fs::path json_path = project_llm_parsed_json_path(doc_path);
+    write_text_file(json_path, build_project_rag_parsed_json(doc_path.filename().string(), parsed));
+    RuntimeLogger::info("[项目RAG][解析] 完成: uuid=" + uuid +
+                        ", file=" + doc_path.filename().string() +
+                        ", parsed_len=" + std::to_string(parsed.size()));
+    return parsed;
+}
+
+static inline std::vector<std::string> load_project_rag_documents(const InfoStore &store,
+                                                                  const std::string &uuid)
+{
+    std::vector<std::string> docs;
+    auto files = list_project_rag_source_docs(store, uuid);
+    docs.reserve(files.size());
+    for (const auto &doc_path : files) {
+        const fs::path json_path = project_llm_parsed_json_path(doc_path);
+        std::string parsed = load_project_rag_parsed_text(json_path);
+        if (parsed.empty()) {
+            RuntimeLogger::info("[项目RAG][解析] 缓存缺失，重新解析: uuid=" + uuid +
+                                ", file=" + doc_path.filename().string());
+            parsed = parse_and_store_project_rag_doc(store, uuid, doc_path);
+        }
+        if (!parsed.empty()) {
+            docs.push_back(std::move(parsed));
+        }
+    }
+    return docs;
+}
+
+static inline std::string append_history_entry_json(std::string history_json,
+                                                    const std::string &timestamp,
+                                                    const std::string &question,
+                                                    const std::string &answer,
+                                                    const std::vector<std::string> &contexts)
+{
+    std::ostringstream entry;
+    entry << "{\"timestamp\":\"" << json_escape(timestamp)
+          << "\",\"question\":\"" << json_escape(question)
+          << "\",\"answer\":\"" << json_escape(answer)
+          << "\",\"contexts\":[";
+    for (std::size_t i = 0; i < contexts.size(); ++i) {
+        if (i > 0) entry << ',';
+        entry << '"' << json_escape(contexts[i]) << '"';
+    }
+    entry << "]}";
+
+    history_json = trim_copy(history_json);
+    if (history_json.empty()) {
+        return "[\n  " + entry.str() + "\n]\n";
+    }
+    if (history_json == "[]") {
+        return "[\n  " + entry.str() + "\n]\n";
+    }
+
+    const auto pos = history_json.rfind(']');
+    if (pos == std::string::npos) {
+        return "[\n  " + entry.str() + "\n]\n";
+    }
+
+    std::string prefix = history_json.substr(0, pos);
+    prefix = trim_copy(prefix);
+    if (!prefix.empty() && prefix.back() != '[') {
+        prefix += ",\n  ";
+    } else {
+        prefix += "\n  ";
+    }
+    prefix += entry.str();
+    prefix += "\n]\n";
+    return prefix;
+}
+
+static inline void append_project_llm_history(const InfoStore &store,
+                                              const std::string &uuid,
+                                              const std::string &question,
+                                              const std::string &answer,
+                                              const std::vector<std::string> &contexts)
+{
+    const fs::path path = project_llm_history_path(store, uuid);
+    std::string current = "[]\n";
+    if (fs::exists(path)) {
+        current = read_text_file(path);
+    }
+
+    const std::string updated = append_history_entry_json(current,
+                                                          now_iso8601_utc(),
+                                                          question,
+                                                          answer,
+                                                          contexts);
+    write_text_file(path, updated);
+}
+
+static inline std::string load_project_llm_history_json(const InfoStore &store,
+                                                        const std::string &uuid)
+{
+    const fs::path path = project_llm_history_path(store, uuid);
+    if (!fs::exists(path)) {
+        return "[]\n";
+    }
+    return read_text_file(path);
+}
+
+static inline void clear_project_llm_state(const InfoStore &store, const std::string &uuid)
+{
+    std::error_code ec;
+    fs::remove(project_llm_history_path(store, uuid), ec);
+    ec.clear();
+    fs::remove_all(project_llm_doc_dir(store, uuid), ec);
+}
+
+static inline crow::json::wvalue execute_llm_chat_request(InfoStore &store,
+                                                          const crow::json::rvalue &body,
+                                                          const std::optional<std::string> &project_uuid)
+{
+    if (!body.has("question") || body["question"].t() != crow::json::type::String) {
+        throw std::runtime_error("missing question");
+    }
+
+    std::string question = trim_copy(body["question"].s());
+    if (question.empty()) throw std::runtime_error("question 不能为空");
+    RuntimeLogger::info("[RAG][问答] 问题已解析: question_len=" + std::to_string(question.size()) +
+                        ", preview=" + RuntimeLogger::preview(question, 80));
+
+    auto cfg = load_llm_settings(store);
+    if (body.has("top_k") && body["top_k"].t() == crow::json::type::Number) {
+        cfg.top_k = static_cast<int>(body["top_k"].i());
+    }
+    if (body.has("temperature") && body["temperature"].t() == crow::json::type::Number) {
+        cfg.temperature = body["temperature"].d();
+    }
+    if (body.has("system_prompt") && body["system_prompt"].t() == crow::json::type::String) {
+        cfg.system_prompt = body["system_prompt"].s();
+    }
+    if (cfg.top_k < 1) cfg.top_k = 1;
+    if (cfg.top_k > 10) cfg.top_k = 10;
+
+    auto files = list_rag_docs_for_index(store);
+    RuntimeLogger::info("[RAG][检索] 全局文档数=" + std::to_string(files.size()));
+    std::vector<std::string> docs;
+    int parse_failed = 0;
+    std::string first_error;
+    for (const auto &p : files) {
+        try {
+            std::string text = load_or_build_rag_cached_text(store, p);
+            if (!text.empty()) {
+                RuntimeLogger::debug("[RAG][检索] 全局文档提取成功: file=" + p.filename().string() +
+                                     ", text_len=" + std::to_string(text.size()));
+                docs.push_back(std::move(text));
+            } else {
+                RuntimeLogger::warn("[RAG][检索] 全局文档提取为空: file=" + p.filename().string());
+            }
+        } catch (const std::exception &ex) {
+            ++parse_failed;
+            RuntimeLogger::warn(std::string("[RAG][检索] 全局文档提取失败: file=") + p.filename().string() +
+                                ", error=" + ex.what());
+            if (first_error.empty()) {
+                first_error = p.filename().string() + ": " + ex.what();
+            }
+        }
+    }
+
+    if (project_uuid.has_value()) {
+        auto project_docs = load_project_rag_documents(store, *project_uuid);
+        RuntimeLogger::info("[项目RAG][检索] 项目文档数=" + std::to_string(project_docs.size()) +
+                            ", uuid=" + *project_uuid);
+        for (auto &doc : project_docs) {
+            docs.push_back(std::move(doc));
+        }
+    }
+
+    RuntimeLogger::info("[RAG][检索] 文档提取完成: success=" + std::to_string(docs.size()) +
+                        ", failed=" + std::to_string(parse_failed));
+
+    if (!files.empty() && docs.empty()) {
+        std::string msg = "RAG 文档存在，但未提取到可索引文本";
+        msg += "（失败 " + std::to_string(parse_failed) + "/" + std::to_string(files.size()) + "）";
+        if (!first_error.empty()) {
+            msg += "，示例错误: " + first_error;
+        }
+        throw std::runtime_error(msg);
+    }
+
+    RagIndex index;
+    int chunks = index.index_documents(docs);
+    RuntimeLogger::info("[RAG][检索] 索引完成: chunks=" + std::to_string(chunks));
+    auto contexts = index.retrieve(question, cfg.top_k);
+    RuntimeLogger::info("[RAG][检索] 召回完成: top_k=" + std::to_string(cfg.top_k) +
+                        ", hit=" + std::to_string(contexts.size()));
+    std::string answer = llm_chat_completion(cfg, question, contexts);
+    RuntimeLogger::info("[RAG][问答] 回答生成完成: answer_len=" + std::to_string(answer.size()));
+
+    if (project_uuid.has_value()) {
+        append_project_llm_history(store, *project_uuid, question, answer, contexts);
+    }
+
+    crow::json::wvalue context_arr;
+    context_arr = crow::json::wvalue::list();
+    for (std::size_t i = 0; i < contexts.size(); ++i) {
+        context_arr[static_cast<unsigned int>(i)] = contexts[i];
+    }
+
+    crow::json::wvalue res;
+    res["answer"] = answer;
+    res["chunks"] = chunks;
+    res["contexts"] = std::move(context_arr);
+    return res;
 }
 
 static inline std::string llm_settings_to_json(const LlmSettings &cfg)
@@ -2937,90 +3213,122 @@ inline void register_info_routes(App &app, InfoStore &store, const std::string &
             RuntimeLogger::info("[RAG][问答] 收到请求: body_bytes=" + std::to_string(req.body.size()));
             auto body = crow::json::load(req.body);
             if (!body) throw std::runtime_error("invalid json");
-            if (!body.has("question") || body["question"].t() != crow::json::type::String) {
-                throw std::runtime_error("missing question");
-            }
-
-            std::string question = trim_copy(body["question"].s());
-            if (question.empty()) throw std::runtime_error("question 不能为空");
-            RuntimeLogger::info("[RAG][问答] 问题已解析: question_len=" + std::to_string(question.size()) +
-                                ", preview=" + RuntimeLogger::preview(question, 80));
-
-            auto cfg = load_llm_settings(store);
-            if (body.has("top_k") && body["top_k"].t() == crow::json::type::Number) {
-                cfg.top_k = static_cast<int>(body["top_k"].i());
-            }
-            if (body.has("temperature") && body["temperature"].t() == crow::json::type::Number) {
-                cfg.temperature = body["temperature"].d();
-            }
-            if (body.has("system_prompt") && body["system_prompt"].t() == crow::json::type::String) {
-                cfg.system_prompt = body["system_prompt"].s();
-            }
-            if (cfg.top_k < 1) cfg.top_k = 1;
-            if (cfg.top_k > 10) cfg.top_k = 10;
-
-            auto files = list_rag_docs_for_index(store);
-            RuntimeLogger::info("[RAG][检索] 可索引文档数=" + std::to_string(files.size()));
-            std::vector<std::string> docs;
-            int parse_failed = 0;
-            std::string first_error;
-            for (const auto &p : files) {
-                try {
-                    std::string text = load_or_build_rag_cached_text(store, p);
-                    if (!text.empty()) {
-                        RuntimeLogger::debug("[RAG][检索] 文档提取成功: file=" + p.filename().string() +
-                                             ", text_len=" + std::to_string(text.size()));
-                        docs.push_back(std::move(text));
-                    } else {
-                        RuntimeLogger::warn("[RAG][检索] 文档提取为空: file=" + p.filename().string());
-                    }
-                } catch (const std::exception &ex) {
-                    ++parse_failed;
-                    RuntimeLogger::warn(std::string("[RAG][检索] 文档提取失败: file=") + p.filename().string() +
-                                        ", error=" + ex.what());
-                    if (first_error.empty()) {
-                        first_error = p.filename().string() + ": " + ex.what();
-                    }
-                }
-            }
-
-            RuntimeLogger::info("[RAG][检索] 文档提取完成: success=" + std::to_string(docs.size()) +
-                                ", failed=" + std::to_string(parse_failed));
-
-            if (!files.empty() && docs.empty()) {
-                std::string msg = "RAG 文档存在，但未提取到可索引文本";
-                msg += "（失败 " + std::to_string(parse_failed) + "/" + std::to_string(files.size()) + "）";
-                if (!first_error.empty()) {
-                    msg += "，示例错误: " + first_error;
-                }
-                throw std::runtime_error(msg);
-            }
-
-            RagIndex index;
-            int chunks = index.index_documents(docs);
-            RuntimeLogger::info("[RAG][检索] 索引完成: chunks=" + std::to_string(chunks));
-            auto contexts = index.retrieve(question, cfg.top_k);
-            RuntimeLogger::info("[RAG][检索] 召回完成: top_k=" + std::to_string(cfg.top_k) +
-                                ", hit=" + std::to_string(contexts.size()));
-            std::string answer = llm_chat_completion(cfg, question, contexts);
-            RuntimeLogger::info("[RAG][问答] 回答生成完成: answer_len=" + std::to_string(answer.size()));
-
-            crow::json::wvalue context_arr;
-            context_arr = crow::json::wvalue::list();
-            for (std::size_t i = 0; i < contexts.size(); ++i) {
-                context_arr[static_cast<unsigned int>(i)] = contexts[i];
-            }
-
-            crow::json::wvalue res;
-            res["answer"] = answer;
-            res["chunks"] = chunks;
-            res["contexts"] = std::move(context_arr);
+            auto res = execute_llm_chat_request(store, body, std::nullopt);
             crow::response r{res};
             r.code = 200;
             set_json_headers(r);
             return r;
         } catch (const std::exception &e) {
             RuntimeLogger::error(std::string("[RAG][问答] 失败: ") + e.what());
+            crow::response r{std::string("{\"error\":\"") + e.what() + "\"}"};
+            r.code = 400;
+            set_json_headers(r);
+            return r;
+        }
+    });
+
+    CROW_ROUTE(app, "/api/project/<string>/llm/doc").methods(crow::HTTPMethod::POST)([&store](const crow::request &req, const std::string &uuid) {
+        try {
+            if (!store.exists(uuid)) throw std::runtime_error("project not found");
+            RuntimeLogger::info("[项目RAG][上传] 收到请求: uuid=" + uuid +
+                                ", body_bytes=" + std::to_string(req.body.size()));
+
+            fs::path dir = project_llm_doc_dir(store, uuid);
+            fs::create_directories(dir);
+            std::string content_type = req.get_header_value("Content-Type");
+
+            auto save_doc = [&](const std::string &raw_name, const std::string &content) {
+                std::string filename = sanitize_filename(raw_name);
+                if (filename.empty()) filename = "document.txt";
+                fs::path out = dir / filename;
+                write_text_file(out, content);
+                parse_and_store_project_rag_doc(store, uuid, out);
+                RuntimeLogger::info("[项目RAG][上传] 保存成功: uuid=" + uuid +
+                                    ", file=" + filename +
+                                    ", bytes=" + std::to_string(content.size()));
+            };
+
+            if (content_type.find("multipart/form-data") != std::string::npos) {
+                crow::multipart::message msg(req);
+                bool saved = false;
+                for (auto &part : msg.parts) {
+                    std::string filename;
+                    const auto &cd = part.get_header_object("Content-Disposition");
+                    auto it = cd.params.find("filename");
+                    if (it != cd.params.end()) filename = it->second;
+                    if (filename.empty()) continue;
+                    save_doc(filename, part.body);
+                    saved = true;
+                }
+                if (!saved) {
+                    throw std::runtime_error("missing file");
+                }
+            } else {
+                std::string filename = req.get_header_value("X-Filename");
+                if (filename.empty()) filename = "document.txt";
+                save_doc(filename, req.body);
+            }
+
+            crow::response r{"{\"message\":\"文档上传成功\"}"};
+            r.code = 200;
+            set_json_headers(r);
+            return r;
+        } catch (const std::exception &e) {
+            RuntimeLogger::error(std::string("[项目RAG][上传] 失败: ") + e.what());
+            crow::response r{std::string("{\"error\":\"") + e.what() + "\"}"};
+            r.code = 400;
+            set_json_headers(r);
+            return r;
+        }
+    });
+
+    CROW_ROUTE(app, "/api/project/<string>/llm/chat").methods(crow::HTTPMethod::POST)([&store](const crow::request &req, const std::string &uuid) {
+        try {
+            if (!store.exists(uuid)) throw std::runtime_error("project not found");
+            RuntimeLogger::info("[项目RAG][问答] 收到请求: uuid=" + uuid +
+                                ", body_bytes=" + std::to_string(req.body.size()));
+            auto body = crow::json::load(req.body);
+            if (!body) throw std::runtime_error("invalid json");
+            auto res = execute_llm_chat_request(store, body, uuid);
+            crow::response r{res};
+            r.code = 200;
+            set_json_headers(r);
+            return r;
+        } catch (const std::exception &e) {
+            RuntimeLogger::error(std::string("[项目RAG][问答] 失败: ") + e.what());
+            crow::response r{std::string("{\"error\":\"") + e.what() + "\"}"};
+            r.code = 400;
+            set_json_headers(r);
+            return r;
+        }
+    });
+
+    CROW_ROUTE(app, "/api/project/<string>/llm/history").methods(crow::HTTPMethod::GET)([&store](const std::string &uuid) {
+        try {
+            if (!store.exists(uuid)) throw std::runtime_error("project not found");
+            crow::response r{load_project_llm_history_json(store, uuid)};
+            r.code = 200;
+            set_json_headers(r);
+            return r;
+        } catch (const std::exception &e) {
+            crow::response r{std::string("{\"error\":\"") + e.what() + "\"}"};
+            r.code = 400;
+            set_json_headers(r);
+            return r;
+        }
+    });
+
+    CROW_ROUTE(app, "/api/project/<string>/llm/history/delete").methods(crow::HTTPMethod::POST)([&store](const std::string &uuid) {
+        try {
+            if (!store.exists(uuid)) throw std::runtime_error("project not found");
+            clear_project_llm_state(store, uuid);
+            RuntimeLogger::info("[项目RAG][清理] 完成: uuid=" + uuid);
+            crow::response r{"{\"message\":\"历史记录已删除\"}"};
+            r.code = 200;
+            set_json_headers(r);
+            return r;
+        } catch (const std::exception &e) {
+            RuntimeLogger::error(std::string("[项目RAG][清理] 失败: ") + e.what());
             crow::response r{std::string("{\"error\":\"") + e.what() + "\"}"};
             r.code = 400;
             set_json_headers(r);
@@ -3802,6 +4110,42 @@ inline void register_info_routes(App &app, InfoStore &store, const std::string &
     });
 
     CROW_ROUTE(app, "/api/llm/chat").methods(crow::HTTPMethod::OPTIONS)([](){
+        crow::response r;
+        r.set_header("Access-Control-Allow-Origin", "*");
+        r.set_header("Access-Control-Allow-Methods", "POST, OPTIONS");
+        r.set_header("Access-Control-Allow-Headers", "Content-Type");
+        r.code = 204;
+        return r;
+    });
+
+    CROW_ROUTE(app, "/api/project/<string>/llm/doc").methods(crow::HTTPMethod::OPTIONS)([](const std::string &){
+        crow::response r;
+        r.set_header("Access-Control-Allow-Origin", "*");
+        r.set_header("Access-Control-Allow-Methods", "POST, OPTIONS");
+        r.set_header("Access-Control-Allow-Headers", "Content-Type, X-Filename");
+        r.code = 204;
+        return r;
+    });
+
+    CROW_ROUTE(app, "/api/project/<string>/llm/chat").methods(crow::HTTPMethod::OPTIONS)([](const std::string &){
+        crow::response r;
+        r.set_header("Access-Control-Allow-Origin", "*");
+        r.set_header("Access-Control-Allow-Methods", "POST, OPTIONS");
+        r.set_header("Access-Control-Allow-Headers", "Content-Type");
+        r.code = 204;
+        return r;
+    });
+
+    CROW_ROUTE(app, "/api/project/<string>/llm/history").methods(crow::HTTPMethod::OPTIONS)([](const std::string &){
+        crow::response r;
+        r.set_header("Access-Control-Allow-Origin", "*");
+        r.set_header("Access-Control-Allow-Methods", "GET, OPTIONS");
+        r.set_header("Access-Control-Allow-Headers", "Content-Type");
+        r.code = 204;
+        return r;
+    });
+
+    CROW_ROUTE(app, "/api/project/<string>/llm/history/delete").methods(crow::HTTPMethod::OPTIONS)([](const std::string &){
         crow::response r;
         r.set_header("Access-Control-Allow-Origin", "*");
         r.set_header("Access-Control-Allow-Methods", "POST, OPTIONS");

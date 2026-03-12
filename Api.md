@@ -211,6 +211,36 @@
 	- 会自动检索 `db/llmdb/` 文档并注入上下文
 - 返回：200，`{ "answer": "...", "chunks": 12, "contexts": ["..."] }`
 
+26) 项目临时上传 RAG 文档
+- 方法：POST /api/project/{uuid}/llm/doc
+- 支持：`multipart/form-data` 或直接二进制（`X-Filename`）
+- 说明：
+	- 文档保存到 `db/{uuid}/llmdoc/`
+	- 上传后立即解析，并在同目录生成与原文件同名、后缀为 `.json` 的解析结果
+	- 仅当前项目会在项目级问答中使用该目录下的文档
+- 返回：200，`{ "message": "文档上传成功" }`
+
+27) 项目级 RAG + 大模型问答
+- 方法：POST /api/project/{uuid}/llm/chat
+- 请求体：`{ "question": "...", "top_k": 4, "temperature": 0.2, "system_prompt": "..." }`
+- 说明：
+	- 默认使用 `db/llm.json` 中的 `base_url`、`api_key`、`model`
+	- 会同时检索全局 `db/llmdb/` 文档和当前项目 `db/{uuid}/llmdoc/` 文档
+	- 不会使用其他项目目录中的临时文档
+	- 对话成功后会将历史记录追加保存到 `db/{uuid}/llm_history.json`
+- 返回：200，`{ "answer": "...", "chunks": 12, "contexts": ["..."] }`
+
+28) 获取项目 LLM / RAG 历史记录
+- 方法：GET /api/project/{uuid}/llm/history
+- 返回：200，历史记录 JSON 数组
+
+29) 删除项目 LLM / RAG 历史记录与临时文档
+- 方法：POST /api/project/{uuid}/llm/history/delete
+- 说明：
+	- 删除 `db/{uuid}/llm_history.json`
+	- 删除 `db/{uuid}/llmdoc/` 中的原始文档与解析后的 `.json` 文档
+- 返回：200，`{ "message": "历史记录已删除" }`
+
 ## 请求/响应头
 - 请求：POST/PATCH 请使用 `Content-Type: application/json`
 - 响应：`Content-Type: application/json`
@@ -221,6 +251,8 @@
 - `db/{uuid}/project.json` — 项目创建时生成，记录项目处理相关状态。
 - `db/llm.json` — 大模型配置（`base_url`、`api_key`、`model`、`temperature`、`top_k`、`system_prompt`）。
 - `db/llmdb/` — RAG 文档目录（上传的文本/PDF等文档持久化存储）。
+- `db/{uuid}/llmdoc/` — 当前项目临时 RAG 文档目录，以及上传后即时生成的解析 `.json` 文件。
+- `db/{uuid}/llm_history.json` — 当前项目的 LLM / RAG 历史对话记录。
 
 ## 本地快速上手
 - 构建：在项目根目录运行 `./BuildmacOS.sh`
