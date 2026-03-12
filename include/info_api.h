@@ -239,6 +239,57 @@ static inline void ensure_project_json_field(const fs::path &project_json,
     write_text_file(project_json, json);
 }
 
+static inline std::string build_default_project_json_content(const std::string &uuid)
+{
+    std::string s;
+    s += "{\n";
+    s += "  \"uuid\": \"" + uuid + "\",\n";
+    s += "  \"raw\": false,\n";
+    s += "  \"nii\": false,\n";
+    s += "  \"dcm\": false,\n";
+    s += "  \"semi\": false,\n";
+    s += "  \"semi-xL\": -1,\n";
+    s += "  \"semi-xR\": -1,\n";
+    s += "  \"semi-yL\": -1,\n";
+    s += "  \"semi-yR\": -1,\n";
+    s += "  \"processed\": false,\n";
+    s += "  \"PD\": false,\n";
+    s += "  \"PD-nii\": false,\n";
+    s += "  \"PD-dcm\": false,\n";
+    s += "  \"PD-3d\": false\n";
+    s += "}\n";
+    return s;
+}
+
+static inline void write_default_project_json_file(const fs::path &path, const std::string &uuid)
+{
+    write_text_file(path, build_default_project_json_content(uuid));
+}
+
+static inline fs::path temp_projects_root_dir(const InfoStore &store)
+{
+    return store.base_path / "temp";
+}
+
+static inline fs::path temp_project_dir(const InfoStore &store, const std::string &temp_uuid)
+{
+    return temp_projects_root_dir(store) / temp_uuid;
+}
+
+static inline bool temp_project_exists(const InfoStore &store, const std::string &temp_uuid)
+{
+    return fs::exists(temp_project_dir(store, temp_uuid) / "project.json");
+}
+
+static inline fs::path require_temp_project_dir(const InfoStore &store, const std::string &temp_uuid)
+{
+    fs::path dir = temp_project_dir(store, temp_uuid);
+    if (!fs::exists(dir / "project.json")) {
+        throw std::runtime_error("temp project not found");
+    }
+    return dir;
+}
+
 static inline std::vector<double> npy_to_double_2d(const cnpy::NpyArray &arr, int &height, int &width)
 {
     if (arr.shape.size() != 2) {
@@ -3142,6 +3193,506 @@ inline void register_info_routes(App &app, InfoStore &store, const std::string &
         save_llm_settings(store, default_llm_settings());
     }
 
+    auto make_json_error = [](const std::string &message, int code = 400) {
+        crow::response r{std::string("{\"error\":\"") + message + "\"}"};
+        r.code = code;
+        set_json_headers(r);
+        return r;
+    };
+
+    auto make_json_ok = [](const std::string &body, int code = 200) {
+        crow::response r{body};
+        r.code = code;
+        set_json_headers(r);
+        return r;
+    };
+
+    auto make_file_list_response = [&](const fs::path &dir) {
+        return make_json_ok(json_filename_array(list_files(dir)));
+    };
+
+    auto make_binary_file_response = [&](const fs::path &path, const std::string &content_type) {
+        if (!fs::exists(path)) throw std::runtime_error("file not found");
+        crow::response r{read_text_file(path)};
+        r.set_header("Content-Type", content_type);
+        r.set_header("Access-Control-Allow-Origin", "*");
+        r.code = 200;
+        return r;
+    };
+
+    auto make_zip_response = [&](const fs::path &dir,
+                                 const std::string &zip_name,
+                                 const std::string &download_name) {
+        auto zip_path = create_zip_store(dir, zip_name);
+        crow::response r{read_text_file(zip_path)};
+        r.set_header("Content-Type", "application/zip");
+        r.set_header("Content-Disposition", "attachment; filename=\"" + download_name + "\"");
+        return r;
+    };
+
+    auto handle_upload_to_project_dir = [&](const crow::request &req, const fs::path &project_dir) {
+        fs::path temp_dir = project_dir / "temp";
+        fs::create_directories(temp_dir);
+
+        std::string content_type = req.get_header_value("Content-Type");
+        if (content_type.find("multipart/form-data") != std::string::npos) {
+            crow::multipart::message msg(req);
+            int saved = 0;
+            for (auto &part : msg.parts) {
+                std::string filename;
+                const auto &cd = part.get_header_object("Content-Disposition");
+                auto it = cd.params.find("filename");
+                if (it != cd.params.end()) filename = it->second;
+                if (filename.empty()) filename = "noname.bin";
+                fs::path out = temp_dir / fs::path(filename).filename();
+                write_text_file(out, part.body);
+                ++saved;
+            }
+            return make_json_ok(std::string("{\"saved\":") + std::to_string(saved) + "}");
+        }
+
+        std::string filename = req.get_header_value("X-Filename");
+        if (filename.empty()) filename = "noname.bin";
+        fs::path out = temp_dir / fs::path(filename).filename();
+        write_text_file(out, req.body);
+        return make_json_ok("{\"saved\":1}");
+    };
+
+    auto handle_uninit_project_dir = [&](const fs::path &project_dir) {
+        std::error_code ec;
+        fs::remove_all(project_dir / "temp", ec);
+        update_project_json_fields(project_dir / "project.json", {{"raw", "false"}});
+        return make_json_ok("{\"status\":\"ok\"}");
+    };
+
+    auto handle_inited_project_dir = [&](const crow::request &req,
+                                         const fs::path &project_dir,
+                                         const std::string &project_label) {
+        RuntimeLogger::info("[项目初始化] 开始: id=" + project_label);
+        auto maybe_raw = extract_string_field(req.body, "raw");
+        if (!maybe_raw) throw std::runtime_error("missing raw");
+        std::string raw = to_lower_copy(*maybe_raw);
+        if (raw != "png" && raw != "npz" && raw != "markednpz" && raw != "dcm" && raw != "nii") {
+            throw std::runtime_error("invalid raw type");
+        }
+
+        fs::path temp_dir = project_dir / "temp";
+        fs::path npz_dir = project_dir / "npz";
+        fs::path png_dir = project_dir / "png";
+        fs::path marked_dir = project_dir / "markedpng";
+        fs::create_directories(temp_dir);
+
+        auto temp_files = list_files(temp_dir);
+        if (temp_files.empty()) throw std::runtime_error("temp 为空");
+        RuntimeLogger::info("[项目初始化] temp文件数量=" + std::to_string(temp_files.size()) + ", raw=" + raw + ", id=" + project_label);
+
+        if (raw != "npz" && raw != "markednpz") {
+            fs::create_directories(npz_dir);
+            for (const auto &src : temp_files) {
+                fs::path dst = npz_dir / (src.stem().string() + ".npz");
+                all2npz(src, dst);
+            }
+        }
+
+        if (raw != "png") {
+            if (raw == "npz") {
+                for (const auto &src : temp_files) {
+                    convert_npz_to_pngs(src, png_dir, marked_dir, false);
+                }
+            } else if (raw == "markednpz") {
+                for (const auto &src : temp_files) {
+                    convert_npz_to_pngs(src, png_dir, marked_dir, true, true, "_marked");
+                }
+            } else if (raw == "dcm" || raw == "nii") {
+                for (const auto &src : temp_files) {
+                    fs::path dst = png_dir / (src.stem().string() + ".png");
+                    all2png(src, dst);
+                }
+            }
+        }
+
+        std::string raw_dir = (raw == "markednpz") ? "npz" : raw;
+        fs::path target_dir = project_dir / raw_dir;
+        std::error_code ec;
+        if (fs::exists(target_dir)) fs::remove_all(target_dir, ec);
+        fs::rename(temp_dir, target_dir, ec);
+        if (ec) throw std::runtime_error("重命名 temp 失败: " + ec.message());
+
+        fs::path project_json = project_dir / "project.json";
+        std::map<std::string, std::string> kv;
+        kv["raw"] = "\"" + raw + "\"";
+        if (raw == "dcm") kv["dcm"] = "\"raw\"";
+        if (raw == "nii") kv["nii"] = "\"raw\"";
+        update_project_json_fields(project_json, kv);
+        RuntimeLogger::info("[项目初始化] 完成: id=" + project_label + ", raw_dir=" + raw_dir);
+        return make_json_ok("{\"status\":\"ok\"}");
+    };
+
+    auto handle_start_analysis_for_project_dir = [&](const crow::request &req,
+                                                     const fs::path &project_dir,
+                                                     const std::string &project_label) {
+        RuntimeLogger::info("[推理流程] 开始: id=" + project_label);
+        if (onnx_path.empty()) throw std::runtime_error("未指定onnx文件，无法使用推理功能");
+        if (!fs::exists(onnx_path)) throw std::runtime_error("onnx文件不存在: " + onnx_path);
+
+        auto mode = extract_string_field(req.body, "mode");
+        if (!mode) mode = extract_string_field(req.body, "PD");
+        if (!mode) mode = extract_string_field(req.body, "type");
+        if (!mode) throw std::runtime_error("missing mode");
+        std::string mode_val = to_lower_copy(*mode);
+        if (mode_val != "raw" && mode_val != "semi") throw std::runtime_error("invalid mode");
+
+        fs::path project_json = project_dir / "project.json";
+        std::string json = read_text_file(project_json);
+        ensure_project_json_field(project_json, "processed", "false");
+        int semi_xL = extract_int_field(json, "semi-xL").value_or(-1);
+        int semi_xR = extract_int_field(json, "semi-xR").value_or(-1);
+        int semi_yL = extract_int_field(json, "semi-yL").value_or(-1);
+        int semi_yR = extract_int_field(json, "semi-yR").value_or(-1);
+
+        fs::path input_npz_dir = project_dir / "npz";
+        auto npz_files = list_files(input_npz_dir);
+        if (npz_files.empty()) throw std::runtime_error("npz为空");
+
+        fs::path processed_dir = project_dir / "processed";
+        fs::path processed_npz_dir = processed_dir / "npzs";
+        fs::path processed_png_dir = processed_dir / "pngs";
+        std::error_code ec;
+        fs::remove_all(processed_dir, ec);
+        fs::remove_all(project_dir / "3d", ec);
+        fs::remove_all(project_dir / "OG3d", ec);
+        fs::create_directories(processed_npz_dir);
+        fs::create_directories(processed_png_dir);
+
+        const int out_size = 512;
+        const int img_size = 224;
+        for (const auto &src : npz_files) {
+            cnpy::npz_t npz = cnpy::npz_load(src.string());
+            const cnpy::NpyArray *raw_arr = find_npz_array(npz, {"image", "img", "raw", "ct", "data", "slice", "input"});
+            if (!raw_arr) raw_arr = &npz.begin()->second;
+            if (!raw_arr || raw_arr->shape.size() != 2) throw std::runtime_error("npz中未找到2D原始图像");
+
+            std::vector<int64_t> pred = run_onnx_inference_mask(onnx_path, *raw_arr, img_size, out_size, infer_threads);
+            bool has_crop = (mode_val == "semi") && is_valid_crop(semi_xL, semi_xR, semi_yL, semi_yR, out_size, out_size);
+            int crop_xL = has_crop ? semi_xL : -1;
+            int crop_xR = has_crop ? semi_xR : -1;
+            int crop_yL = has_crop ? semi_yL : -1;
+            int crop_yR = has_crop ? semi_yR : -1;
+
+            fs::path out_npz = processed_npz_dir / (src.stem().string() + "-PD.npz");
+            save_npz_with_same_keys(src.string(), out_npz.string(), pred, out_size, out_size, "label", crop_xL, crop_xR, crop_yL, crop_yR);
+            convert_npz_to_pngs(out_npz, processed_png_dir, processed_png_dir, true, false, "");
+        }
+
+        update_project_json_fields(project_json, {
+            {"processed", "\"" + mode_val + "\""},
+            {"PD", "\"" + mode_val + "\""},
+            {"PD-nii", "false"},
+            {"PD-dcm", "false"},
+            {"PD-3d", "false"}
+        });
+        RuntimeLogger::info("[推理流程] 完成: id=" + project_label + ", 文件数=" + std::to_string(npz_files.size()));
+        return make_json_ok("{\"status\":\"ok\"}");
+    };
+
+    auto handle_patch_semi_for_project_dir = [&](const crow::request &req, const fs::path &project_dir) {
+        auto xl = extract_int_field(req.body, "semi-xL");
+        auto xr = extract_int_field(req.body, "semi-xR");
+        auto yl = extract_int_field(req.body, "semi-yL");
+        auto yr = extract_int_field(req.body, "semi-yR");
+        if (!xl || !xr || !yl || !yr) throw std::runtime_error("invalid json");
+        bool all_minus_one = (*xl == -1 && *xr == -1 && *yl == -1 && *yr == -1);
+        update_project_json_fields(project_dir / "project.json", {
+            {"semi-xL", std::to_string(*xl)},
+            {"semi-xR", std::to_string(*xr)},
+            {"semi-yL", std::to_string(*yl)},
+            {"semi-yR", std::to_string(*yr)},
+            {"semi", all_minus_one ? "false" : "true"}
+        });
+        return make_json_ok("{\"status\":\"ok\"}");
+    };
+
+    CROW_ROUTE(app, "/api/temp/create").methods(crow::HTTPMethod::POST)([&store, &make_json_error](const crow::request &req) {
+        try {
+            const std::string temp_uuid = generate_uuid_v4();
+            fs::path dir = temp_project_dir(store, temp_uuid);
+            fs::create_directories(dir);
+            write_default_project_json_file(dir / "project.json", temp_uuid);
+            crow::json::wvalue res;
+            res["tempUUID"] = temp_uuid;
+            auto maybe_name = extract_string_field(req.body, "name");
+            if (maybe_name) res["name"] = *maybe_name;
+            crow::response r{res};
+            r.code = 201;
+            set_json_headers(r);
+            return r;
+        } catch (const std::exception &e) {
+            return make_json_error(e.what());
+        }
+    });
+
+    CROW_ROUTE(app, "/api/temp/<string>/convert").methods(crow::HTTPMethod::POST)([&store, &make_json_error](const crow::request &req, const std::string &temp_uuid) {
+        try {
+            fs::path src_dir = require_temp_project_dir(store, temp_uuid);
+            auto maybe_name = extract_string_field(req.body, "name");
+            auto maybe_note = extract_string_field(req.body, "note");
+            const std::string name = maybe_name ? *maybe_name : (std::string("temp-") + temp_uuid.substr(0, 8));
+            const std::string note = maybe_note ? *maybe_note : std::string("");
+            Project created = store.create(name, note);
+            fs::path dst_dir = store.base_path / created.uuid;
+            std::error_code ec;
+            fs::remove_all(dst_dir, ec);
+            fs::rename(src_dir, dst_dir, ec);
+            if (ec) throw std::runtime_error("转换临时项目失败: " + ec.message());
+            update_project_json_fields(dst_dir / "project.json", {{"uuid", "\"" + created.uuid + "\""}});
+            crow::response r{created.to_json()};
+            r.code = 201;
+            set_json_headers(r);
+            return r;
+        } catch (const std::exception &e) {
+            return make_json_error(e.what());
+        }
+    });
+
+    CROW_ROUTE(app, "/api/temp/<string>/project.json").methods(crow::HTTPMethod::GET)([&store, &make_json_error](const std::string &temp_uuid) {
+        try {
+            fs::path dir = require_temp_project_dir(store, temp_uuid);
+            crow::response r{read_text_file(dir / "project.json")};
+            r.code = 200;
+            set_json_headers(r);
+            return r;
+        } catch (const std::exception &e) {
+            return make_json_error(e.what(), 404);
+        }
+    });
+
+    CROW_ROUTE(app, "/api/temp/<string>/uninit").methods(crow::HTTPMethod::POST)([&store, &make_json_error, &handle_uninit_project_dir](const std::string &temp_uuid) {
+        try {
+            return handle_uninit_project_dir(require_temp_project_dir(store, temp_uuid));
+        } catch (const std::exception &e) {
+            return make_json_error(e.what());
+        }
+    });
+
+    CROW_ROUTE(app, "/api/temp/<string>/upload").methods(crow::HTTPMethod::POST)([&store, &make_json_error, &handle_upload_to_project_dir](const crow::request &req, const std::string &temp_uuid) {
+        try {
+            return handle_upload_to_project_dir(req, require_temp_project_dir(store, temp_uuid));
+        } catch (const std::exception &e) {
+            return make_json_error(e.what());
+        }
+    });
+
+    CROW_ROUTE(app, "/api/temp/<string>/inited").methods(crow::HTTPMethod::POST)([&store, &make_json_error, &handle_inited_project_dir](const crow::request &req, const std::string &temp_uuid) {
+        try {
+            return handle_inited_project_dir(req, require_temp_project_dir(store, temp_uuid), std::string("temp:") + temp_uuid);
+        } catch (const std::exception &e) {
+            return make_json_error(e.what());
+        }
+    });
+
+    CROW_ROUTE(app, "/api/temp/<string>/start_analysis").methods(crow::HTTPMethod::POST)([&store, &make_json_error, &handle_start_analysis_for_project_dir](const crow::request &req, const std::string &temp_uuid) {
+        try {
+            return handle_start_analysis_for_project_dir(req, require_temp_project_dir(store, temp_uuid), std::string("temp:") + temp_uuid);
+        } catch (const std::exception &e) {
+            return make_json_error(e.what());
+        }
+    });
+
+    CROW_ROUTE(app, "/api/temp/<string>/semi").methods(crow::HTTPMethod::PATCH)([&store, &make_json_error, &handle_patch_semi_for_project_dir](const crow::request &req, const std::string &temp_uuid) {
+        try {
+            return handle_patch_semi_for_project_dir(req, require_temp_project_dir(store, temp_uuid));
+        } catch (const std::exception &e) {
+            return make_json_error(e.what());
+        }
+    });
+
+    CROW_ROUTE(app, "/api/temp/<string>/png").methods(crow::HTTPMethod::GET)([&store, &make_json_error, &make_file_list_response](const std::string &temp_uuid) {
+        try {
+            return make_file_list_response(require_temp_project_dir(store, temp_uuid) / "png");
+        } catch (const std::exception &e) {
+            return make_json_error(e.what());
+        }
+    });
+
+    CROW_ROUTE(app, "/api/temp/<string>/png/<string>").methods(crow::HTTPMethod::GET)([&store, &make_json_error, &make_binary_file_response](const std::string &temp_uuid, const std::string &filename) {
+        try {
+            if (filename.find("..") != std::string::npos || filename.find('/') != std::string::npos || filename.find('\\') != std::string::npos) throw std::runtime_error("invalid filename");
+            return make_binary_file_response(require_temp_project_dir(store, temp_uuid) / "png" / filename, "image/png");
+        } catch (const std::exception &e) {
+            return make_json_error(e.what());
+        }
+    });
+
+    CROW_ROUTE(app, "/api/temp/<string>/markedpng").methods(crow::HTTPMethod::GET)([&store, &make_json_error, &make_file_list_response](const std::string &temp_uuid) {
+        try {
+            return make_file_list_response(require_temp_project_dir(store, temp_uuid) / "markedpng");
+        } catch (const std::exception &e) {
+            return make_json_error(e.what());
+        }
+    });
+
+    CROW_ROUTE(app, "/api/temp/<string>/markedpng/<string>").methods(crow::HTTPMethod::GET)([&store, &make_json_error, &make_binary_file_response](const std::string &temp_uuid, const std::string &filename) {
+        try {
+            if (filename.find("..") != std::string::npos || filename.find('/') != std::string::npos || filename.find('\\') != std::string::npos) throw std::runtime_error("invalid filename");
+            return make_binary_file_response(require_temp_project_dir(store, temp_uuid) / "markedpng" / filename, "image/png");
+        } catch (const std::exception &e) {
+            return make_json_error(e.what());
+        }
+    });
+
+    CROW_ROUTE(app, "/api/temp/<string>/processed/png").methods(crow::HTTPMethod::GET)([&store, &make_json_error, &make_file_list_response](const std::string &temp_uuid) {
+        try {
+            return make_file_list_response(require_temp_project_dir(store, temp_uuid) / "processed" / "pngs");
+        } catch (const std::exception &e) {
+            return make_json_error(e.what());
+        }
+    });
+
+    CROW_ROUTE(app, "/api/temp/<string>/processed/png/<string>").methods(crow::HTTPMethod::GET)([&store, &make_json_error, &make_binary_file_response](const std::string &temp_uuid, const std::string &filename) {
+        try {
+            if (filename.find("..") != std::string::npos || filename.find('/') != std::string::npos || filename.find('\\') != std::string::npos) throw std::runtime_error("invalid filename");
+            return make_binary_file_response(require_temp_project_dir(store, temp_uuid) / "processed" / "pngs" / filename, "image/png");
+        } catch (const std::exception &e) {
+            return make_json_error(e.what());
+        }
+    });
+
+    CROW_ROUTE(app, "/api/temp/<string>/download/png").methods(crow::HTTPMethod::GET)([&store, &make_json_error, &make_zip_response](const std::string &temp_uuid) {
+        try {
+            return make_zip_response(require_temp_project_dir(store, temp_uuid) / "png", temp_uuid + "_temp_png.zip", "png.zip");
+        } catch (const std::exception &e) {
+            return make_json_error(e.what());
+        }
+    });
+
+    CROW_ROUTE(app, "/api/temp/<string>/download/markedpng").methods(crow::HTTPMethod::GET)([&store, &make_json_error, &make_zip_response](const std::string &temp_uuid) {
+        try {
+            return make_zip_response(require_temp_project_dir(store, temp_uuid) / "markedpng", temp_uuid + "_temp_markedpng.zip", "markedpng.zip");
+        } catch (const std::exception &e) {
+            return make_json_error(e.what());
+        }
+    });
+
+    CROW_ROUTE(app, "/api/temp/<string>/download/fused/png").methods(crow::HTTPMethod::GET)([&store, &make_json_error, &make_zip_response](const std::string &temp_uuid) {
+        fs::path fused_dir;
+        try {
+            fs::path dir = require_temp_project_dir(store, temp_uuid);
+            fused_dir = build_fused_png_temp_dir(dir / "png", dir / "markedpng", temp_uuid + "_temp_fused_png");
+            auto response = make_zip_response(fused_dir, temp_uuid + "_temp_fused_png.zip", "png_markedpng_fused.zip");
+            std::error_code ec;
+            fs::remove_all(fused_dir, ec);
+            return response;
+        } catch (const std::exception &e) {
+            std::error_code ec;
+            if (!fused_dir.empty()) fs::remove_all(fused_dir, ec);
+            return make_json_error(e.what());
+        }
+    });
+
+    CROW_ROUTE(app, "/api/temp/<string>/download/npz").methods(crow::HTTPMethod::GET)([&store, &make_json_error, &make_zip_response](const std::string &temp_uuid) {
+        try {
+            return make_zip_response(require_temp_project_dir(store, temp_uuid) / "npz", temp_uuid + "_temp_npz.zip", "npz.zip");
+        } catch (const std::exception &e) {
+            return make_json_error(e.what());
+        }
+    });
+
+    CROW_ROUTE(app, "/api/temp/<string>/download/dcm").methods(crow::HTTPMethod::GET)([&store, &make_json_error, &make_zip_response](const std::string &temp_uuid) {
+        try {
+            fs::path dir = require_temp_project_dir(store, temp_uuid);
+            fs::path dcm_dir = dir / "dcm";
+            if (list_files(dcm_dir).empty()) {
+                ensure_converted_from_npz_dir(dir / "npz", dcm_dir, "dcm", "image");
+                update_project_json_fields(dir / "project.json", {{"dcm", "true"}});
+            }
+            return make_zip_response(dcm_dir, temp_uuid + "_temp_dcm.zip", "dcm.zip");
+        } catch (const std::exception &e) {
+            return make_json_error(e.what());
+        }
+    });
+
+    CROW_ROUTE(app, "/api/temp/<string>/download/nii").methods(crow::HTTPMethod::GET)([&store, &make_json_error, &make_zip_response](const std::string &temp_uuid) {
+        try {
+            fs::path dir = require_temp_project_dir(store, temp_uuid);
+            fs::path nii_dir = dir / "nii";
+            if (list_files(nii_dir).empty()) {
+                ensure_converted_from_npz_dir(dir / "npz", nii_dir, "nii", "image");
+                update_project_json_fields(dir / "project.json", {{"nii", "true"}});
+            }
+            return make_zip_response(nii_dir, temp_uuid + "_temp_nii.zip", "nii.zip");
+        } catch (const std::exception &e) {
+            return make_json_error(e.what());
+        }
+    });
+
+    CROW_ROUTE(app, "/api/temp/<string>/download/processed/png").methods(crow::HTTPMethod::GET)([&store, &make_json_error, &make_zip_response](const std::string &temp_uuid) {
+        try {
+            return make_zip_response(require_temp_project_dir(store, temp_uuid) / "processed" / "pngs", temp_uuid + "_temp_processed_png.zip", "processed_png.zip");
+        } catch (const std::exception &e) {
+            return make_json_error(e.what());
+        }
+    });
+
+    CROW_ROUTE(app, "/api/temp/<string>/download/processed/markedpng").methods(crow::HTTPMethod::GET)([&store, &make_json_error, &make_zip_response](const std::string &temp_uuid) {
+        try {
+            return make_zip_response(require_temp_project_dir(store, temp_uuid) / "processed" / "pngs", temp_uuid + "_temp_processed_markedpng.zip", "processed_markedpng.zip");
+        } catch (const std::exception &e) {
+            return make_json_error(e.what());
+        }
+    });
+
+    CROW_ROUTE(app, "/api/temp/<string>/download/processed/fused/png").methods(crow::HTTPMethod::GET)([&store, &make_json_error, &make_zip_response](const std::string &temp_uuid) {
+        fs::path fused_dir;
+        try {
+            fs::path dir = require_temp_project_dir(store, temp_uuid);
+            fused_dir = build_fused_png_temp_dir(dir / "png", dir / "processed" / "pngs", temp_uuid + "_temp_processed_fused_png");
+            auto response = make_zip_response(fused_dir, temp_uuid + "_temp_processed_fused_png.zip", "processed_png_markedpng_fused.zip");
+            std::error_code ec;
+            fs::remove_all(fused_dir, ec);
+            return response;
+        } catch (const std::exception &e) {
+            std::error_code ec;
+            if (!fused_dir.empty()) fs::remove_all(fused_dir, ec);
+            return make_json_error(e.what());
+        }
+    });
+
+    CROW_ROUTE(app, "/api/temp/<string>/download/processed/npz").methods(crow::HTTPMethod::GET)([&store, &make_json_error, &make_zip_response](const std::string &temp_uuid) {
+        try {
+            return make_zip_response(require_temp_project_dir(store, temp_uuid) / "processed" / "npzs", temp_uuid + "_temp_processed_npz.zip", "processed_npz.zip");
+        } catch (const std::exception &e) {
+            return make_json_error(e.what());
+        }
+    });
+
+    CROW_ROUTE(app, "/api/temp/<string>/download/processed/dcm").methods(crow::HTTPMethod::GET)([&store, &make_json_error, &make_zip_response](const std::string &temp_uuid) {
+        try {
+            fs::path dir = require_temp_project_dir(store, temp_uuid);
+            fs::path dcm_dir = dir / "processed" / "dcm";
+            if (list_files(dcm_dir).empty()) {
+                ensure_converted_from_npz_dir(dir / "processed" / "npzs", dcm_dir, "dcm", "label");
+                update_project_json_fields(dir / "project.json", {{"PD-dcm", "true"}});
+            }
+            return make_zip_response(dcm_dir, temp_uuid + "_temp_processed_dcm.zip", "processed_dcm.zip");
+        } catch (const std::exception &e) {
+            return make_json_error(e.what());
+        }
+    });
+
+    CROW_ROUTE(app, "/api/temp/<string>/download/processed/nii").methods(crow::HTTPMethod::GET)([&store, &make_json_error, &make_zip_response](const std::string &temp_uuid) {
+        try {
+            fs::path dir = require_temp_project_dir(store, temp_uuid);
+            fs::path nii_dir = dir / "processed" / "nii";
+            if (list_files(nii_dir).empty()) {
+                ensure_converted_from_npz_dir(dir / "processed" / "npzs", nii_dir, "nii", "label");
+                update_project_json_fields(dir / "project.json", {{"PD-nii", "true"}});
+            }
+            return make_zip_response(nii_dir, temp_uuid + "_temp_processed_nii.zip", "processed_nii.zip");
+        } catch (const std::exception &e) {
+            return make_json_error(e.what());
+        }
+    });
+
     CROW_ROUTE(app, "/api/llm/settings").methods(crow::HTTPMethod::GET)([&store]() {
         try {
             auto cfg = load_llm_settings(store);
@@ -4670,6 +5221,24 @@ inline void register_info_routes(App &app, InfoStore &store, const std::string &
         r.set_header("Access-Control-Allow-Origin", "*");
         r.set_header("Access-Control-Allow-Methods", "POST, OPTIONS");
         r.set_header("Access-Control-Allow-Headers", "Content-Type");
+        r.code = 204;
+        return r;
+    });
+
+    CROW_ROUTE(app, "/api/temp/create").methods(crow::HTTPMethod::OPTIONS)([](){
+        crow::response r;
+        r.set_header("Access-Control-Allow-Origin", "*");
+        r.set_header("Access-Control-Allow-Methods", "POST, OPTIONS");
+        r.set_header("Access-Control-Allow-Headers", "Content-Type");
+        r.code = 204;
+        return r;
+    });
+
+    CROW_ROUTE(app, "/api/temp/<string>/<path>").methods(crow::HTTPMethod::OPTIONS)([](const std::string &, const std::string &){
+        crow::response r;
+        r.set_header("Access-Control-Allow-Origin", "*");
+        r.set_header("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS");
+        r.set_header("Access-Control-Allow-Headers", "Content-Type, X-Filename");
         r.code = 204;
         return r;
     });

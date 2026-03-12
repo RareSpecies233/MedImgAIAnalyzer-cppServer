@@ -62,6 +62,15 @@ int main(int argc, char **argv)
     RuntimeLogger::info(std::string("推理线程数: ") + std::to_string(infer_threads));
     RuntimeLogger::info(std::string("日志文件保存: ") + (no_log_file ? "关闭" : "开启"));
     RuntimeLogger::info(std::string("Crow日志级别: ") + (crow_debug ? "DEBUG(全量)" : "WARNING及以上"));
+    {
+        std::error_code ec;
+        std::filesystem::remove_all(std::filesystem::path("db") / "temp", ec);
+        if (ec) {
+            RuntimeLogger::warn(std::string("启动清理临时项目失败: ") + ec.message());
+        } else {
+            RuntimeLogger::info("启动时已清理历史临时项目: db/temp");
+        }
+    }
     if (!onnx_path.empty()) {
         RuntimeLogger::info("ONNX 路径: " + onnx_path);
     }

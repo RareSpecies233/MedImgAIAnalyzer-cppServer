@@ -5,6 +5,7 @@
 ## 当前能力
 
 - 项目增删改查与 project.json 状态管理
+- temp 临时项目创建、启动时自动清理、转正式项目
 - png、npz、dcm、nii 初始化与格式转换
 - 原始 png、markedpng、处理后标注图的列表与单图访问
 - png、markedpng、处理后标注图、融合图、npz、dcm、nii 的 ZIP 下载
@@ -29,6 +30,19 @@
 ```text
 db/
 ├─ info.json                    # 项目索引
+├─ temp/                        # 临时项目根目录（程序每次启动时会整体清空）
+│  └─ {temp-UUID}/
+│     ├─ project.json           # 临时项目状态
+│     ├─ temp/                  # 上传暂存目录
+│     ├─ png/
+│     ├─ markedpng/
+│     ├─ npz/
+│     ├─ dcm/
+│     ├─ nii/
+│     ├─ processed/
+│     ├─ enhDBprocessed/
+│     ├─ 3d/
+│     └─ OG3d/
 ├─ llm.json                     # 全局 LLM 配置
 ├─ llmdb/                       # 全局 RAG 文档
 │  └─ __cache__/                # 全局 RAG 文本缓存
@@ -56,6 +70,14 @@ db/
    ├─ llmdoc/                   # 当前项目临时 RAG 文档
    └─ llm_history.json          # 当前项目 LLM/RAG 历史记录
 ```
+
+## Temp 临时项目说明
+
+- 临时项目目录固定为 `db/temp/{tempUUID}`
+- 程序每次启动时都会删除整个 `db/temp/`，用于清理上一次运行残留的临时项目
+- 临时项目使用独立的 temp 前缀接口，不会写入 `db/info.json`
+- 当需要保留临时项目结果时，可调用 `POST /api/temp/{tempUUID}/convert` 将其转为正式项目并写入项目索引
+- 当前 temp 机制已支持基础工作流：创建、上传、初始化、裁剪参数修改、推理、PNG/markedpng/processed 访问与 ZIP 下载、以及转正式项目
 
 ## PNG 与标注图说明
 

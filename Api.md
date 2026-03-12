@@ -1,5 +1,7 @@
 ## 基本说明
 - 所有接口均以 `/api/` 为前缀（服务器已配置为使用该前缀）。
+- temp 临时项目接口统一使用 `/api/temp/` 前缀，与正式项目接口分开。
+- 程序每次启动时会自动删除 `db/temp/` 下上一次运行遗留的全部临时项目。
 
 ## JSON 模式（info.json）
 - `uuid`: 字符串（RFC UUID）
@@ -63,6 +65,72 @@
 - 请求体：`{ "note": "string" }`
 - 返回：200，更新后的项目对象
 - 未找到：404
+
+5.1) 创建临时项目
+- 方法：POST /api/temp/create
+- 请求体：可选，允许附带 `name`
+- 返回：201，`{ "tempUUID": "...", "name": "..." }`
+
+5.2) 临时项目转正式项目
+- 方法：POST /api/temp/{tempUUID}/convert
+- 请求体：可选，支持 `name`、`note`
+- 作用：将 `db/temp/{tempUUID}` 整体移动到新的正式项目目录，并写入 `db/info.json`
+- 返回：201，正式项目对象（包含新的 `uuid`、`createdAt`、`updatedAt`）
+
+5.3) 获取临时项目 project.json
+- 方法：GET /api/temp/{tempUUID}/project.json
+- 返回：200（project.json 对象）
+- 未找到：404，`{ "error": "temp project not found" }`
+
+5.4) 取消临时项目初始化
+- 方法：POST /api/temp/{tempUUID}/uninit
+- 作用：删除 `db/temp/{tempUUID}/temp`，并将 `project.json` 的 `raw` 设为 `false`
+- 返回：200，`{ "status": "ok" }`
+
+5.5) 上传文件到临时项目
+- 方法：POST /api/temp/{tempUUID}/upload
+- 作用：上传文件到 `db/temp/{tempUUID}/temp`
+- 支持：`multipart/form-data` 或直接二进制（使用 `X-Filename` 指定文件名；若未命名则使用 `noname.bin`）
+- 返回：200，`{ "saved": <count> }`
+
+5.6) 完成临时项目初始化
+- 方法：POST /api/temp/{tempUUID}/inited
+- 请求体：`{ "raw": "png|npz|markednpz|dcm|nii" }`
+- 说明：行为与正式项目 `/api/project/{uuid}/inited` 一致，但作用目录为 `db/temp/{tempUUID}`
+- 返回：200，`{ "status": "ok" }`
+
+5.7) 更新临时项目裁剪参数
+- 方法：PATCH /api/temp/{tempUUID}/semi
+- 请求体：`{ "semi-xL": int, "semi-xR": int, "semi-yL": int, "semi-yR": int }`
+- 规则：当四个参数均为 `-1` 时，将 `project.json` 的 `semi` 设为 `false`；否则设为 `true`
+- 返回：200，`{ "status": "ok" }`
+
+5.8) 临时项目开始推理
+- 方法：POST /api/temp/{tempUUID}/start_analysis
+- 请求体：`{ "mode": "raw|semi" }`（也兼容 `PD` 或 `type`）
+- 说明：行为与正式项目 `/api/project/{uuid}/start_analysis` 一致，但作用目录为 `db/temp/{tempUUID}`
+- 返回：200，`{ "status": "ok" }`
+
+5.9) 临时项目图像与下载接口
+- 以下接口均与正式项目同名接口行为一致，只是将 `{uuid}` 替换为 `{tempUUID}`，并且统一使用 `/api/temp/` 前缀：
+- `GET /api/temp/{tempUUID}/png`
+- `GET /api/temp/{tempUUID}/png/{filename}`
+- `GET /api/temp/{tempUUID}/markedpng`
+- `GET /api/temp/{tempUUID}/markedpng/{filename}`
+- `GET /api/temp/{tempUUID}/processed/png`
+- `GET /api/temp/{tempUUID}/processed/png/{filename}`
+- `GET /api/temp/{tempUUID}/download/png`
+- `GET /api/temp/{tempUUID}/download/markedpng`
+- `GET /api/temp/{tempUUID}/download/fused/png`
+- `GET /api/temp/{tempUUID}/download/npz`
+- `GET /api/temp/{tempUUID}/download/dcm`
+- `GET /api/temp/{tempUUID}/download/nii`
+- `GET /api/temp/{tempUUID}/download/processed/png`
+- `GET /api/temp/{tempUUID}/download/processed/markedpng`
+- `GET /api/temp/{tempUUID}/download/processed/fused/png`
+- `GET /api/temp/{tempUUID}/download/processed/npz`
+- `GET /api/temp/{tempUUID}/download/processed/dcm`
+- `GET /api/temp/{tempUUID}/download/processed/nii`
 
 6) 上传文件
 - 方法：POST /api/project/{uuid}/upload
