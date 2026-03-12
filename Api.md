@@ -102,6 +102,15 @@
 - 方法：GET /api/project/{uuid}/download/png
 - 返回：ZIP（存储模式）
 
+9.1.1) 下载 markedpng
+- 方法：GET /api/project/{uuid}/download/markedpng
+- 返回：ZIP（存储模式）
+
+9.1.2) 下载 png + markedpng 融合图
+- 方法：GET /api/project/{uuid}/download/fused/png
+- 说明：以后端临时融合 `db/{uuid}/png` 与 `db/{uuid}/markedpng` 后再打包返回
+- 返回：ZIP（存储模式）
+
 9.2) 下载 npz
 - 方法：GET /api/project/{uuid}/download/npz
 - 返回：ZIP（存储模式）
@@ -139,6 +148,16 @@
 
 13) 下载处理过的图片
 - 方法：GET /api/project/{uuid}/download/processed/png
+- 返回：ZIP（存储模式）
+
+13.1) 下载处理过的 markedpng
+- 方法：GET /api/project/{uuid}/download/processed/markedpng
+- 说明：当前实现中处理后的标注图保存在 `db/{uuid}/processed/pngs`
+- 返回：ZIP（存储模式）
+
+13.2) 下载处理后的 png + markedpng 融合图
+- 方法：GET /api/project/{uuid}/download/processed/fused/png
+- 说明：以后端临时融合原始 `db/{uuid}/png` 与处理后的 `db/{uuid}/processed/pngs` 后再打包返回
 - 返回：ZIP（存储模式）
 
 14) 下载处理过的 npz

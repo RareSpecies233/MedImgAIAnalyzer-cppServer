@@ -1539,6 +1539,7 @@ static inline std::string powershell_single_quote_escape(const std::string &s)
 }
 
 static inline bool command_exists(const std::string &cmd);
+static inline std::string random_hex_id(std::size_t length);
 
 static inline fs::path create_zip_store(const fs::path &dir, const std::string &zip_name)
 {
@@ -1596,6 +1597,135 @@ static inline fs::path create_zip_store(const fs::path &dir, const std::string &
     RuntimeLogger::info(std::string("[目录转zip] 压缩参数: level=5, multicore=") + (used_multicore ? "on" : "off"));
     RuntimeLogger::info("[目录转zip] 完成: " + tmp.string());
     return tmp;
+}
+
+static inline bool ends_with_copy(const std::string &value, const std::string &suffix)
+{
+    return value.size() >= suffix.size() &&
+           value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
+static inline std::string derive_base_png_stem(std::string stem)
+{
+    if (ends_with_copy(stem, "_marked")) {
+        stem.resize(stem.size() - 7);
+    }
+    if (ends_with_copy(stem, "-PD")) {
+        stem.resize(stem.size() - 3);
+    }
+    if (ends_with_copy(stem, "_marked")) {
+        stem.resize(stem.size() - 7);
+    }
+    return stem;
+}
+
+static inline cv::Mat ensure_bgr_image(const cv::Mat &image)
+{
+    if (image.empty()) return {};
+    if (image.channels() == 3) return image.clone();
+
+    cv::Mat converted;
+    if (image.channels() == 1) {
+        cv::cvtColor(image, converted, cv::COLOR_GRAY2BGR);
+        return converted;
+    }
+    if (image.channels() == 4) {
+        cv::cvtColor(image, converted, cv::COLOR_BGRA2BGR);
+        return converted;
+    }
+    throw std::runtime_error("不支持的基础PNG通道数");
+}
+
+static inline cv::Mat ensure_bgra_image(const cv::Mat &image)
+{
+    if (image.empty()) return {};
+    if (image.channels() == 4) return image.clone();
+
+    cv::Mat converted;
+    if (image.channels() == 3) {
+        cv::cvtColor(image, converted, cv::COLOR_BGR2BGRA);
+        return converted;
+    }
+    if (image.channels() == 1) {
+        cv::cvtColor(image, converted, cv::COLOR_GRAY2BGRA);
+        return converted;
+    }
+    throw std::runtime_error("不支持的标注PNG通道数");
+}
+
+static inline void blend_png_with_markedpng(const fs::path &base_png,
+                                            const fs::path &marked_png,
+                                            const fs::path &out_png)
+{
+    RuntimeLogger::info("[PNG融合] 开始: base=" + base_png.string() +
+                        ", overlay=" + marked_png.string() +
+                        " -> " + out_png.string());
+    cv::Mat base = cv::imread(base_png.string(), cv::IMREAD_UNCHANGED);
+    cv::Mat overlay = cv::imread(marked_png.string(), cv::IMREAD_UNCHANGED);
+    if (base.empty()) throw std::runtime_error("读取基础PNG失败: " + base_png.string());
+    if (overlay.empty()) throw std::runtime_error("读取标注PNG失败: " + marked_png.string());
+
+    cv::Mat base_bgr = ensure_bgr_image(base);
+    cv::Mat overlay_bgra = ensure_bgra_image(overlay);
+    if (overlay_bgra.size() != base_bgr.size()) {
+        cv::resize(overlay_bgra, overlay_bgra, base_bgr.size(), 0, 0, cv::INTER_NEAREST);
+    }
+
+    cv::Mat blended = base_bgr.clone();
+    for (int r = 0; r < blended.rows; ++r) {
+        for (int c = 0; c < blended.cols; ++c) {
+            const cv::Vec4b over_px = overlay_bgra.at<cv::Vec4b>(r, c);
+            const double alpha = static_cast<double>(over_px[3]) / 255.0;
+            if (alpha <= 0.0) continue;
+            cv::Vec3b &base_px = blended.at<cv::Vec3b>(r, c);
+            for (int ch = 0; ch < 3; ++ch) {
+                const double mixed = base_px[ch] * (1.0 - alpha) + over_px[ch] * alpha;
+                base_px[ch] = static_cast<uchar>(std::clamp(mixed, 0.0, 255.0));
+            }
+        }
+    }
+
+    fs::create_directories(out_png.parent_path());
+    if (!cv::imwrite(out_png.string(), blended)) {
+        throw std::runtime_error("写入融合PNG失败: " + out_png.string());
+    }
+    RuntimeLogger::info("[PNG融合] 完成: " + out_png.string());
+}
+
+static inline fs::path build_fused_png_temp_dir(const fs::path &base_dir,
+                                                const fs::path &overlay_dir,
+                                                const std::string &tag)
+{
+    if (!fs::exists(base_dir)) throw std::runtime_error("基础PNG目录不存在");
+    if (!fs::exists(overlay_dir)) throw std::runtime_error("标注PNG目录不存在");
+
+    fs::path out_dir = fs::temp_directory_path() / (tag + "_" + random_hex_id(8));
+    fs::create_directories(out_dir);
+
+    auto overlays = list_files(overlay_dir);
+    int fused_count = 0;
+    for (const auto &overlay : overlays) {
+        if (to_lower_copy(overlay.extension().string()) != ".png") continue;
+        const std::string overlay_stem = overlay.stem().string();
+        const std::string base_stem = derive_base_png_stem(overlay_stem);
+        fs::path base_png = base_dir / (base_stem + ".png");
+        if (!fs::exists(base_png)) {
+            RuntimeLogger::warn("[PNG融合] 未找到基础图，跳过: overlay=" + overlay.filename().string() +
+                                ", expected_base=" + base_png.filename().string());
+            continue;
+        }
+
+        fs::path out_png = out_dir / (overlay_stem + "_fused.png");
+        blend_png_with_markedpng(base_png, overlay, out_png);
+        ++fused_count;
+    }
+
+    if (fused_count == 0) {
+        std::error_code ec;
+        fs::remove_all(out_dir, ec);
+        throw std::runtime_error("未生成任何融合PNG");
+    }
+    return out_dir;
 }
 
 static inline void ensure_converted_from_npz_dir(const fs::path &npz_dir,
@@ -3779,6 +3909,44 @@ inline void register_info_routes(App &app, InfoStore &store, const std::string &
         }
     });
 
+    CROW_ROUTE(app, "/api/project/<string>/download/markedpng").methods(crow::HTTPMethod::GET)([&store](const std::string &uuid){
+        try {
+            RuntimeLogger::info("[下载] 请求markedPNG压缩包: uuid=" + uuid);
+            if (!store.exists(uuid)) throw std::runtime_error("project not found");
+            fs::path dir = store.base_path / uuid / "markedpng";
+            auto zip_path = create_zip_store(dir, uuid + "_markedpng.zip");
+            crow::response r{read_text_file(zip_path)};
+            r.set_header("Content-Type", "application/zip");
+            r.set_header("Content-Disposition", "attachment; filename=\"markedpng.zip\"");
+            return r;
+        } catch (const std::exception &e) {
+            crow::response r{std::string("{\"error\":\"") + e.what() + "\"}"};
+            r.code = 400; set_json_headers(r); return r;
+        }
+    });
+
+    CROW_ROUTE(app, "/api/project/<string>/download/fused/png").methods(crow::HTTPMethod::GET)([&store](const std::string &uuid){
+        fs::path fused_dir;
+        try {
+            RuntimeLogger::info("[下载] 请求PNG与markedPNG融合压缩包: uuid=" + uuid);
+            if (!store.exists(uuid)) throw std::runtime_error("project not found");
+            fs::path project_dir = store.base_path / uuid;
+            fused_dir = build_fused_png_temp_dir(project_dir / "png", project_dir / "markedpng", uuid + "_fused_png");
+            auto zip_path = create_zip_store(fused_dir, uuid + "_fused_png.zip");
+            crow::response r{read_text_file(zip_path)};
+            r.set_header("Content-Type", "application/zip");
+            r.set_header("Content-Disposition", "attachment; filename=\"png_markedpng_fused.zip\"");
+            std::error_code ec;
+            fs::remove_all(fused_dir, ec);
+            return r;
+        } catch (const std::exception &e) {
+            std::error_code ec;
+            if (!fused_dir.empty()) fs::remove_all(fused_dir, ec);
+            crow::response r{std::string("{\"error\":\"") + e.what() + "\"}"};
+            r.code = 400; set_json_headers(r); return r;
+        }
+    });
+
     // 下载 npz
     CROW_ROUTE(app, "/api/project/<string>/download/npz").methods(crow::HTTPMethod::GET)([&store](const std::string &uuid){
         try {
@@ -3853,6 +4021,46 @@ inline void register_info_routes(App &app, InfoStore &store, const std::string &
             r.set_header("Content-Disposition", "attachment; filename=\"processed_png.zip\"");
             return r;
         } catch (const std::exception &e) {
+            crow::response r{std::string("{\"error\":\"") + e.what() + "\"}"};
+            r.code = 400; set_json_headers(r); return r;
+        }
+    });
+
+    CROW_ROUTE(app, "/api/project/<string>/download/processed/markedpng").methods(crow::HTTPMethod::GET)([&store](const std::string &uuid){
+        try {
+            RuntimeLogger::info("[下载] 请求processed markedPNG压缩包: uuid=" + uuid);
+            if (!store.exists(uuid)) throw std::runtime_error("project not found");
+            fs::path dir = store.base_path / uuid / "processed" / "pngs";
+            auto zip_path = create_zip_store(dir, uuid + "_processed_markedpng.zip");
+            crow::response r{read_text_file(zip_path)};
+            r.set_header("Content-Type", "application/zip");
+            r.set_header("Content-Disposition", "attachment; filename=\"processed_markedpng.zip\"");
+            return r;
+        } catch (const std::exception &e) {
+            crow::response r{std::string("{\"error\":\"") + e.what() + "\"}"};
+            r.code = 400; set_json_headers(r); return r;
+        }
+    });
+
+    CROW_ROUTE(app, "/api/project/<string>/download/processed/fused/png").methods(crow::HTTPMethod::GET)([&store](const std::string &uuid){
+        fs::path fused_dir;
+        try {
+            RuntimeLogger::info("[下载] 请求processed PNG与markedPNG融合压缩包: uuid=" + uuid);
+            if (!store.exists(uuid)) throw std::runtime_error("project not found");
+            fs::path project_dir = store.base_path / uuid;
+            fused_dir = build_fused_png_temp_dir(project_dir / "png",
+                                                project_dir / "processed" / "pngs",
+                                                uuid + "_processed_fused_png");
+            auto zip_path = create_zip_store(fused_dir, uuid + "_processed_fused_png.zip");
+            crow::response r{read_text_file(zip_path)};
+            r.set_header("Content-Type", "application/zip");
+            r.set_header("Content-Disposition", "attachment; filename=\"processed_png_markedpng_fused.zip\"");
+            std::error_code ec;
+            fs::remove_all(fused_dir, ec);
+            return r;
+        } catch (const std::exception &e) {
+            std::error_code ec;
+            if (!fused_dir.empty()) fs::remove_all(fused_dir, ec);
             crow::response r{std::string("{\"error\":\"") + e.what() + "\"}"};
             r.code = 400; set_json_headers(r); return r;
         }
@@ -4289,7 +4497,25 @@ inline void register_info_routes(App &app, InfoStore &store, const std::string &
         return r;
     });
 
+    CROW_ROUTE(app, "/api/project/<string>/download/fused/png").methods(crow::HTTPMethod::OPTIONS)([](const std::string &){
+        crow::response r;
+        r.set_header("Access-Control-Allow-Origin", "*");
+        r.set_header("Access-Control-Allow-Methods", "GET, OPTIONS");
+        r.set_header("Access-Control-Allow-Headers", "Content-Type");
+        r.code = 204;
+        return r;
+    });
+
     CROW_ROUTE(app, "/api/project/<string>/download/processed/<string>").methods(crow::HTTPMethod::OPTIONS)([](const std::string &, const std::string &){
+        crow::response r;
+        r.set_header("Access-Control-Allow-Origin", "*");
+        r.set_header("Access-Control-Allow-Methods", "GET, OPTIONS");
+        r.set_header("Access-Control-Allow-Headers", "Content-Type");
+        r.code = 204;
+        return r;
+    });
+
+    CROW_ROUTE(app, "/api/project/<string>/download/processed/fused/png").methods(crow::HTTPMethod::OPTIONS)([](const std::string &){
         crow::response r;
         r.set_header("Access-Control-Allow-Origin", "*");
         r.set_header("Access-Control-Allow-Methods", "GET, OPTIONS");
