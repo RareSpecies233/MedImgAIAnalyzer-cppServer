@@ -436,38 +436,7 @@ inline void register_temp_advanced_routes(App &app, InfoStore &store)
 
     CROW_ROUTE(app, "/api/temp/<string>/to_3d_model").methods(crow::HTTPMethod::POST)([&store](const std::string &temp_uuid){
         try {
-            fs::path project_dir = require_temp_project_dir(store, temp_uuid);
-            fs::path project_json = project_dir / "project.json";
-            std::string json = read_text_file(project_json);
-
-            fs::path processed_npz_dir = project_dir / "processed" / "npzs";
-            if (list_files(processed_npz_dir).empty()) {
-                throw std::runtime_error("processed npz 为空");
-            }
-
-            fs::path out_dir = project_dir / "3d";
-            std::error_code ec;
-            fs::remove_all(out_dir, ec);
-            fs::create_directories(out_dir);
-
-            npz_to_glb::Options opts;
-            opts.use_raw_threshold = true;
-            fs::path out_glb = out_dir / "model.glb";
-            npz_to_glb::convert_directory_to_glb(processed_npz_dir, out_glb, opts);
-
-            auto raw_val = extract_string_field(json, "raw");
-            if (raw_val && to_lower_copy(*raw_val) == "markednpz") {
-                fs::path og_dir = project_dir / "OG3d";
-                fs::remove_all(og_dir, ec);
-                fs::create_directories(og_dir);
-                fs::path og_glb = og_dir / "model.glb";
-                fs::path raw_npz_dir = project_dir / "npz";
-                npz_to_glb::convert_directory_to_glb(raw_npz_dir, og_glb, opts);
-            }
-
-            update_project_json_fields(project_json, {{"PD-3d", "true"}});
-            crow::response r{"{\"status\":\"ok\"}"};
-            r.code = 200; set_json_headers(r); return r;
+            return build_3d_model_project_dir_response(require_temp_project_dir(store, temp_uuid), std::string("temp:") + temp_uuid);
         } catch (const std::exception &e) {
             crow::response r{std::string("{\"error\":\"") + e.what() + "\"}"};
             r.code = 400; set_json_headers(r); return r;
@@ -477,12 +446,7 @@ inline void register_temp_advanced_routes(App &app, InfoStore &store)
     CROW_ROUTE(app, "/api/temp/<string>/download/3d").methods(crow::HTTPMethod::GET)([&store](const std::string &temp_uuid){
         try {
             fs::path project_dir = require_temp_project_dir(store, temp_uuid);
-            fs::path glb_path = project_dir / "3d" / "model.glb";
-            if (!fs::exists(glb_path)) throw std::runtime_error("3d model not found");
-            crow::response r{read_text_file(glb_path)};
-            r.set_header("Content-Type", "model/gltf-binary");
-            r.set_header("Content-Disposition", "attachment; filename=\"model.glb\"");
-            return r;
+            return make_glb_download_response(project_dir / "3d" / "model.glb");
         } catch (const std::exception &e) {
             crow::response r{std::string("{\"error\":\"") + e.what() + "\"}"};
             r.code = 400; set_json_headers(r); return r;
@@ -492,12 +456,7 @@ inline void register_temp_advanced_routes(App &app, InfoStore &store)
     CROW_ROUTE(app, "/api/temp/<string>/download/OG3d").methods(crow::HTTPMethod::GET)([&store](const std::string &temp_uuid){
         try {
             fs::path project_dir = require_temp_project_dir(store, temp_uuid);
-            fs::path glb_path = project_dir / "OG3d" / "model.glb";
-            if (!fs::exists(glb_path)) throw std::runtime_error("OG3d model not found");
-            crow::response r{read_text_file(glb_path)};
-            r.set_header("Content-Type", "model/gltf-binary");
-            r.set_header("Content-Disposition", "attachment; filename=\"model.glb\"");
-            return r;
+            return make_glb_download_response(project_dir / "OG3d" / "model.glb");
         } catch (const std::exception &e) {
             crow::response r{std::string("{\"error\":\"") + e.what() + "\"}"};
             r.code = 400; set_json_headers(r); return r;

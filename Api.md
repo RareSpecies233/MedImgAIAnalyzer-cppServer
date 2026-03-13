@@ -150,6 +150,7 @@
 - `POST /api/temp/{tempUUID}/to_3d_model`
 - `GET /api/temp/{tempUUID}/download/3d`
 - `GET /api/temp/{tempUUID}/download/OG3d`
+- 错误：当 `db/temp/{tempUUID}/processed/npzs` 为空，或体数据无法生成有效网格时，返回 400 和错误 JSON，不会导致服务崩溃
 
 5.12) 临时项目 LLM / RAG 接口
 - 以下接口与正式项目项目级 LLM/RAG 行为一致，作用目录为 `db/temp/{tempUUID}/llmdoc` 与 `db/temp/{tempUUID}/llm_history.json`：
@@ -333,6 +334,7 @@
 - 方法：POST /api/project/{uuid}/to_3d_model
 - 说明：使用 `db/{uuid}/processed/npzs` 生成 3d 模型，保存到 `db/{uuid}/3d`
 - 说明：若 `project.json` 的 `raw` 为 `markednpz`，额外生成原始 3d 模型到 `db/{uuid}/OG3d`
+- 错误：当 `processed/npzs` 为空，或体数据无法生成有效网格时，返回 400 和错误 JSON
 - 返回：200，`{ "status": "ok" }`
 
 18) 下载 3d 模型

@@ -22,6 +22,7 @@
 - Windows 脚本：仓库中保留了 [build-windows.ps1](build-windows.ps1)
 - 启动：执行 `./main`
 - 如需推理功能：启动时传入 `--onnx <model.onnx>`
+- HTTP 服务当前使用单监听实例启动；推理并行度仍由 `--infer-threads <N>` 单独控制
 - 如需关闭日志文件保存：启动时传入 `--nolog`
 - 如需开启 Crow 全量日志：启动时传入 `--crowdebug`
 
@@ -86,7 +87,9 @@ db/
 
 ## 代码结构说明
 
-- 为减少超长文件维护成本，temp 的高级能力路由已从 `include/info_api.h` 拆分到 `include/temp_advanced_api.h`。
+- 为减少超长文件维护成本，temp 的基础项目路由已拆分到 `include/temp_basic_api.h`。
+- temp 的高级能力路由已拆分到 `include/temp_advanced_api.h`。
+- 正式项目与 temp 项目的 3D 生成逻辑已收敛到共享实现，避免两套逻辑漂移。
 
 ## PNG 与标注图说明
 
