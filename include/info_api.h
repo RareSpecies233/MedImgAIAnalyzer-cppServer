@@ -455,6 +455,9 @@ static inline crow::response start_analysis_project_dir_response(const crow::req
     fs::path project_json = project_dir / "project.json";
     std::string json = read_text_file(project_json);
     ensure_project_json_field(project_json, "processed", "false");
+    auto raw_val = extract_string_field(json, "raw");
+    const bool raw_markednpz = raw_val && to_lower_copy(*raw_val) == "markednpz";
+    const bool keep_pd_3d_enabled = project_label.rfind("temp:", 0) == 0 && raw_markednpz;
     int semi_xL = extract_int_field(json, "semi-xL").value_or(-1);
     int semi_xR = extract_int_field(json, "semi-xR").value_or(-1);
     int semi_yL = extract_int_field(json, "semi-yL").value_or(-1);
@@ -518,8 +521,11 @@ static inline crow::response start_analysis_project_dir_response(const crow::req
         {"PD", "\"" + mode_val + "\""},
         {"PD-nii", "false"},
         {"PD-dcm", "false"},
-        {"PD-3d", "false"}
+        {"PD-3d", keep_pd_3d_enabled ? "true" : "false"}
     });
+    RuntimeLogger::info(std::string("[推理流程] project.json 已更新: PD-3d=") +
+                        (keep_pd_3d_enabled ? "true" : "false") +
+                        ", id=" + project_label);
     RuntimeLogger::info("[推理流程] 完成: id=" + project_label + ", 文件数=" + std::to_string(npz_files.size()));
     return make_json_ok_response("{\"status\":\"ok\"}");
 }
