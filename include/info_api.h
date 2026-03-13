@@ -49,6 +49,20 @@ inline void set_json_headers(crow::response &r) {
     r.set_header("Access-Control-Allow-Origin", "*");
 }
 
+static inline crow::response make_json_error_response(const std::string &message, int code = 400) {
+    crow::response r{std::string("{\"error\":\"") + message + "\"}"};
+    r.code = code;
+    set_json_headers(r);
+    return r;
+}
+
+static inline crow::response make_json_ok_response(const std::string &body, int code = 200) {
+    crow::response r{body};
+    r.code = code;
+    set_json_headers(r);
+    return r;
+}
+
 // 从原始 JSON 文本中提取字符串字段的极简解析器（仅用于受控 demo 请求）
 static std::optional<std::string> extract_string_field(const std::string &body, const std::string &key) {
     std::string k = '"' + key + '"';
@@ -1338,6 +1352,10 @@ static inline std::vector<int64_t> run_onnx_inference_mask(const fs::path &onnx_
 #endif
 
     Ort::AllocatorWithDefaultOptions allocator;
+    const size_t input_count = session.GetInputCount();
+    if (input_count == 0) {
+        throw std::runtime_error("ONNX模型缺少输入");
+    }
     Ort::AllocatedStringPtr input_name = session.GetInputNameAllocated(0, allocator);
     std::vector<int64_t> input_shape = {1, 3, img_size, img_size};
     Ort::MemoryInfo mem_info = Ort::MemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
@@ -1345,6 +1363,9 @@ static inline std::vector<int64_t> run_onnx_inference_mask(const fs::path &onnx_
         mem_info, input_chw.data(), input_chw.size(), input_shape.data(), input_shape.size());
 
     size_t output_count = session.GetOutputCount();
+    if (output_count == 0) {
+        throw std::runtime_error("ONNX模型缺少输出");
+    }
     std::vector<Ort::AllocatedStringPtr> output_names;
     std::vector<const char *> output_name_cstrs;
     output_names.reserve(output_count);
@@ -1378,6 +1399,9 @@ static inline std::vector<int64_t> run_onnx_inference_mask(const fs::path &onnx_
     int64_t out_w = out_shape[3];
     if (out_n != 1) {
         throw std::runtime_error("ONNX输出batch不为1");
+    }
+    if (out_c <= 0 || out_h <= 0 || out_w <= 0) {
+        throw std::runtime_error("ONNX输出形状非法");
     }
 
     auto half_to_float = [](uint16_t h) -> float {
@@ -1426,10 +1450,18 @@ static inline std::vector<int64_t> run_onnx_inference_mask(const fs::path &onnx_
         throw std::runtime_error("不支持的ONNX输出数据类型");
     }
 
+    if (out_data == nullptr) {
+        throw std::runtime_error("ONNX输出数据为空");
+    }
+
+    size_t total_vals = static_cast<size_t>(out_n * out_c * out_h * out_w);
+    if (total_vals == 0) {
+        throw std::runtime_error("ONNX输出张量为空");
+    }
+
     std::vector<int64_t> pred(static_cast<size_t>(out_h) * out_w, 0);
     float out_min = out_data[0];
     float out_max = out_data[0];
-    size_t total_vals = static_cast<size_t>(out_n * out_c * out_h * out_w);
     for (size_t i = 1; i < total_vals; ++i) {
         float v = out_data[i];
         if (v < out_min) out_min = v;
@@ -3330,9 +3362,9 @@ inline void register_info_routes(App &app, InfoStore &store, const std::string &
         return make_json_ok("{\"status\":\"ok\"}");
     };
 
-    auto handle_start_analysis_for_project_dir = [&](const crow::request &req,
-                                                     const fs::path &project_dir,
-                                                     const std::string &project_label) {
+    auto handle_start_analysis_for_project_dir = [onnx_path, infer_threads](const crow::request &req,
+                                                                            const fs::path &project_dir,
+                                                                            const std::string &project_label) {
         RuntimeLogger::info("[推理流程] 开始: id=" + project_label);
         if (onnx_path.empty()) throw std::runtime_error("未指定onnx文件，无法使用推理功能");
         if (!fs::exists(onnx_path)) throw std::runtime_error("onnx文件不存在: " + onnx_path);
@@ -3353,8 +3385,17 @@ inline void register_info_routes(App &app, InfoStore &store, const std::string &
         int semi_yR = extract_int_field(json, "semi-yR").value_or(-1);
 
         fs::path input_npz_dir = project_dir / "npz";
-        auto npz_files = list_files(input_npz_dir);
-        if (npz_files.empty()) throw std::runtime_error("npz为空");
+        std::vector<fs::path> npz_files;
+        if (fs::exists(input_npz_dir)) {
+            for (const auto &p : list_files(input_npz_dir)) {
+                if (to_lower_copy(p.extension().string()) == ".npz") {
+                    npz_files.push_back(p);
+                }
+            }
+        }
+        if (npz_files.empty()) {
+            throw std::runtime_error("未找到可用于分析的npz文件，请先上传并完成初始化");
+        }
 
         fs::path processed_dir = project_dir / "processed";
         fs::path processed_npz_dir = processed_dir / "npzs";
@@ -3369,7 +3410,16 @@ inline void register_info_routes(App &app, InfoStore &store, const std::string &
         const int out_size = 512;
         const int img_size = 224;
         for (const auto &src : npz_files) {
-            cnpy::npz_t npz = cnpy::npz_load(src.string());
+            RuntimeLogger::info("[推理流程] 处理文件: " + src.filename().string() + ", id=" + project_label);
+            cnpy::npz_t npz;
+            try {
+                npz = cnpy::npz_load(src.string());
+            } catch (const std::exception &e) {
+                throw std::runtime_error("读取npz失败(" + src.filename().string() + "): " + e.what());
+            }
+            if (npz.empty()) {
+                throw std::runtime_error("npz内容为空: " + src.filename().string());
+            }
             const cnpy::NpyArray *raw_arr = find_npz_array(npz, {"image", "img", "raw", "ct", "data", "slice", "input"});
             if (!raw_arr) raw_arr = &npz.begin()->second;
             if (!raw_arr || raw_arr->shape.size() != 2) throw std::runtime_error("npz中未找到2D原始图像");
@@ -3384,6 +3434,7 @@ inline void register_info_routes(App &app, InfoStore &store, const std::string &
             fs::path out_npz = processed_npz_dir / (src.stem().string() + "-PD.npz");
             save_npz_with_same_keys(src.string(), out_npz.string(), pred, out_size, out_size, "label", crop_xL, crop_xR, crop_yL, crop_yR);
             convert_npz_to_pngs(out_npz, processed_png_dir, processed_png_dir, true, false, "");
+            RuntimeLogger::info("[推理流程] 文件完成: " + src.filename().string() + ", id=" + project_label);
         }
 
         update_project_json_fields(project_json, {
@@ -3394,7 +3445,7 @@ inline void register_info_routes(App &app, InfoStore &store, const std::string &
             {"PD-3d", "false"}
         });
         RuntimeLogger::info("[推理流程] 完成: id=" + project_label + ", 文件数=" + std::to_string(npz_files.size()));
-        return make_json_ok("{\"status\":\"ok\"}");
+        return make_json_ok_response("{\"status\":\"ok\"}");
     };
 
     auto handle_patch_semi_for_project_dir = [&](const crow::request &req, const fs::path &project_dir) {
@@ -3492,11 +3543,13 @@ inline void register_info_routes(App &app, InfoStore &store, const std::string &
         }
     });
 
-    CROW_ROUTE(app, "/api/temp/<string>/start_analysis").methods(crow::HTTPMethod::POST)([&store, &make_json_error, &handle_start_analysis_for_project_dir](const crow::request &req, const std::string &temp_uuid) {
+    CROW_ROUTE(app, "/api/temp/<string>/start_analysis").methods(crow::HTTPMethod::POST)([&store, handle_start_analysis_for_project_dir](const crow::request &req, const std::string &temp_uuid) {
         try {
             return handle_start_analysis_for_project_dir(req, require_temp_project_dir(store, temp_uuid), std::string("temp:") + temp_uuid);
         } catch (const std::exception &e) {
-            return make_json_error(e.what());
+            return make_json_error_response(e.what());
+        } catch (...) {
+            return make_json_error_response("start_analysis发生未知错误", 500);
         }
     });
 
@@ -4298,8 +4351,15 @@ inline void register_info_routes(App &app, InfoStore &store, const std::string &
             int semi_yR = extract_int_field(json, "semi-yR").value_or(-1);
 
             fs::path input_npz_dir = project_dir / "npz";
-            auto npz_files = list_files(input_npz_dir);
-            if (npz_files.empty()) throw std::runtime_error("npz为空");
+            std::vector<fs::path> npz_files;
+            if (fs::exists(input_npz_dir)) {
+                for (const auto &p : list_files(input_npz_dir)) {
+                    if (to_lower_copy(p.extension().string()) == ".npz") {
+                        npz_files.push_back(p);
+                    }
+                }
+            }
+            if (npz_files.empty()) throw std::runtime_error("未找到可用于分析的npz文件，请先上传并完成初始化");
 
             fs::path processed_dir = project_dir / "processed";
             fs::path processed_npz_dir = processed_dir / "npzs";
@@ -4316,7 +4376,15 @@ inline void register_info_routes(App &app, InfoStore &store, const std::string &
             const int img_size = 224;
             for (const auto &src : npz_files) {
                 RuntimeLogger::info("[推理流程] 处理文件: " + src.filename().string());
-                cnpy::npz_t npz = cnpy::npz_load(src.string());
+                cnpy::npz_t npz;
+                try {
+                    npz = cnpy::npz_load(src.string());
+                } catch (const std::exception &e) {
+                    throw std::runtime_error("读取npz失败(" + src.filename().string() + "): " + e.what());
+                }
+                if (npz.empty()) {
+                    throw std::runtime_error("npz内容为空: " + src.filename().string());
+                }
                 const cnpy::NpyArray *raw_arr = find_npz_array(npz, {"image", "img", "raw", "ct", "data", "slice", "input"});
                 if (!raw_arr) {
                     raw_arr = &npz.begin()->second;
