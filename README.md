@@ -77,7 +77,16 @@ db/
 - 程序每次启动时都会删除整个 `db/temp/`，用于清理上一次运行残留的临时项目
 - 临时项目使用独立的 temp 前缀接口，不会写入 `db/info.json`
 - 当需要保留临时项目结果时，可调用 `POST /api/temp/{tempUUID}/convert` 将其转为正式项目并写入项目索引
-- 当前 temp 机制已支持基础工作流：创建、上传、初始化、裁剪参数修改、推理、PNG/markedpng/processed 访问与 ZIP 下载、以及转正式项目
+- temp 路由已与正式项目的核心能力保持对称：
+   - 初始化与推理流程（upload/inited/start_analysis/semi）
+   - 原始与 processed 的 PNG/markedpng 列表、单图访问与下载
+   - 高级增强（start_enhdb、enhdb 访问与下载）
+   - 3D（to_3d_model、download/3d、download/OG3d）
+   - 项目级 LLM/RAG（llm/doc、llm/chat、llm/history、llm/history/delete）
+
+## 代码结构说明
+
+- 为减少超长文件维护成本，temp 的高级能力路由已从 `include/info_api.h` 拆分到 `include/temp_advanced_api.h`。
 
 ## PNG 与标注图说明
 

@@ -3184,6 +3184,8 @@ static inline std::string llm_chat_completion(const LlmSettings &settings,
     throw std::runtime_error("模型响应 content 类型不受支持");
 }
 
+#include "temp_advanced_api.h"
+
 template <typename App>
 inline void register_info_routes(App &app, InfoStore &store, const std::string &onnx_path, int infer_threads) {
     RuntimeLogger::info("register_info_routes 开始执行");
@@ -3692,6 +3694,8 @@ inline void register_info_routes(App &app, InfoStore &store, const std::string &
             return make_json_error(e.what());
         }
     });
+
+    register_temp_advanced_routes(app, store);
 
     CROW_ROUTE(app, "/api/llm/settings").methods(crow::HTTPMethod::GET)([&store]() {
         try {

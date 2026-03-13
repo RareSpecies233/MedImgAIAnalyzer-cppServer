@@ -132,6 +132,32 @@
 - `GET /api/temp/{tempUUID}/download/processed/dcm`
 - `GET /api/temp/{tempUUID}/download/processed/nii`
 
+5.10) 临时项目高级增强接口
+- 以下接口与正式项目 `enhdb` 接口行为一致，作用目录为 `db/temp/{tempUUID}/enhDBprocessed/`：
+- `POST /api/temp/{tempUUID}/start_enhdb`
+- `GET /api/temp/{tempUUID}/enhdb/png`
+- `GET /api/temp/{tempUUID}/enhdb/png/{filename}`
+- `GET /api/temp/{tempUUID}/enhdb/markedpng`
+- `GET /api/temp/{tempUUID}/enhdb/markedpng/{filename}`
+- `GET /api/temp/{tempUUID}/download/enhdb/png`
+- `GET /api/temp/{tempUUID}/download/enhdb/markedpng`
+- `GET /api/temp/{tempUUID}/download/enhdb/fused/png`
+- `GET /api/temp/{tempUUID}/download/enhdb/npz`
+- `GET /api/temp/{tempUUID}/download/enhdb/dcm`
+- `GET /api/temp/{tempUUID}/download/enhdb/nii`
+
+5.11) 临时项目 3D 接口
+- `POST /api/temp/{tempUUID}/to_3d_model`
+- `GET /api/temp/{tempUUID}/download/3d`
+- `GET /api/temp/{tempUUID}/download/OG3d`
+
+5.12) 临时项目 LLM / RAG 接口
+- 以下接口与正式项目项目级 LLM/RAG 行为一致，作用目录为 `db/temp/{tempUUID}/llmdoc` 与 `db/temp/{tempUUID}/llm_history.json`：
+- `POST /api/temp/{tempUUID}/llm/doc`
+- `POST /api/temp/{tempUUID}/llm/chat`
+- `GET /api/temp/{tempUUID}/llm/history`
+- `POST /api/temp/{tempUUID}/llm/history/delete`
+
 6) 上传文件
 - 方法：POST /api/project/{uuid}/upload
 - 作用：上传文件到 `db/{uuid}/temp`
