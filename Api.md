@@ -150,7 +150,9 @@
 - `POST /api/temp/{tempUUID}/to_3d_model`
 - `GET /api/temp/{tempUUID}/download/3d`
 - `GET /api/temp/{tempUUID}/download/OG3d`
-- 错误：当 `db/temp/{tempUUID}/processed/npzs` 为空，或体数据无法生成有效网格时，返回 400 和错误 JSON，不会导致服务崩溃
+- 说明：当临时项目已经完成推理时，优先使用 `db/temp/{tempUUID}/processed/npzs` 生成 `3d/model.glb`
+- 说明：当临时项目尚未推理、但 `project.json` 的 `raw=markednpz` 时，允许直接执行该接口，此时只会尝试生成 `db/temp/{tempUUID}/OG3d/model.glb`
+- 错误：当人工标注或 processed 体数据无法生成有效网格时，返回 400 和错误 JSON，不会导致服务崩溃
 
 5.12) 临时项目 LLM / RAG 接口
 - 以下接口与正式项目项目级 LLM/RAG 行为一致，作用目录为 `db/temp/{tempUUID}/llmdoc` 与 `db/temp/{tempUUID}/llm_history.json`：
@@ -228,9 +230,10 @@
 - 方法：POST /api/project/{uuid}/start_analysis
 - 请求体：`{ "mode": "raw|semi" }`（也兼容 `PD` 或 `type`）
 - 说明：
-	- 处理完成后保存到 `db/{uuid}/processed/npzs`、`db/{uuid}/processed/pngs`、`db/{uuid}/processed/dcm`、`db/{uuid}/processed/nii`
-	- `processed/dcm` 由 `npz -> dcm` 生成，`processed/nii` 由 `npz -> nii` 生成
-	- `project.json` 的 `processed` 设为 `raw` 或 `semi`，并将 `PD-dcm`、`PD-nii` 设为 `true`
+	- 处理完成后保存到 `db/{uuid}/processed/npzs` 与 `db/{uuid}/processed/pngs`
+	- `processed/dcm`、`processed/nii`、`3d` 不会在推理阶段直接生成，而是在对应下载或 3D 请求到来时按需生成
+	- 每次推理都会清理旧的 `processed/`、`3d/`、`OG3d/` 结果，并将 `PD-dcm`、`PD-nii`、`PD-3d` 重置为 `false`
+	- `project.json` 的 `processed` 与 `PD` 会更新为 `raw` 或 `semi`
 - 返回：200，`{ "status": "ok" }`
 
 12) 获取处理过的图片列表

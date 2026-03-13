@@ -84,11 +84,15 @@ db/
    - 高级增强（start_enhdb、enhdb 访问与下载）
    - 3D（to_3d_model、download/3d、download/OG3d）
    - 项目级 LLM/RAG（llm/doc、llm/chat、llm/history、llm/history/delete）
+- 当 temp 项目尚未执行推理、但 `raw=markednpz` 时，`to_3d_model` 会跳过 `processed/npzs`，仅尝试生成人工标注原始 3D 到 `OG3d/`；若标注本身为空，则返回错误 JSON，但不会导致服务崩溃
 
 ## 代码结构说明
 
 - 为减少超长文件维护成本，temp 的基础项目路由已拆分到 `include/temp_basic_api.h`。
 - temp 的高级能力路由已拆分到 `include/temp_advanced_api.h`。
+- 正式项目基础路由已拆分到 `include/project_basic_api.h`。
+- 正式项目高级能力路由已拆分到 `include/project_advanced_api.h`。
+- 全局与项目级 LLM/RAG 路由已拆分到 `include/project_llm_api.h`。
 - 正式项目与 temp 项目的 3D 生成逻辑已收敛到共享实现，避免两套逻辑漂移。
 
 ## PNG 与标注图说明

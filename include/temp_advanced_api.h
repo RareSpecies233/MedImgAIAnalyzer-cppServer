@@ -436,7 +436,7 @@ inline void register_temp_advanced_routes(App &app, InfoStore &store)
 
     CROW_ROUTE(app, "/api/temp/<string>/to_3d_model").methods(crow::HTTPMethod::POST)([&store](const std::string &temp_uuid){
         try {
-            return build_3d_model_project_dir_response(require_temp_project_dir(store, temp_uuid), std::string("temp:") + temp_uuid);
+            return build_3d_model_project_dir_response(require_temp_project_dir(store, temp_uuid), std::string("temp:") + temp_uuid, true);
         } catch (const std::exception &e) {
             crow::response r{std::string("{\"error\":\"") + e.what() + "\"}"};
             r.code = 400; set_json_headers(r); return r;
