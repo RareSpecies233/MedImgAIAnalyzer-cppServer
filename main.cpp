@@ -2,6 +2,7 @@
 
 #include <crow.h>//如果遇到神秘问题可以尝试不要引入全量crow头文件而是只引入需要的
 #include <cctype>
+#include <exception>
 #include <thread>
 #ifdef _WIN32
 #include <windows.h>
@@ -28,6 +29,7 @@ int main(int argc, char **argv)
     std::string model_type = "sota";
     bool no_log_file = false;
     bool crow_debug = false;
+    int api_port = 18080;
     int infer_threads = static_cast<int>(std::thread::hardware_concurrency());
     if (infer_threads <= 0) infer_threads = 1;
 
@@ -61,8 +63,34 @@ int main(int argc, char **argv)
                 std::cerr << "错误: --infer-threads 必须大于0" << std::endl;
                 return 1;
             }
+        } else if (key == "--apiport") {
+            if (i + 1 >= argc) {
+                std::cerr << "错误: --apiport 参数缺少端口值" << std::endl;
+                return 1;
+            }
+            try {
+                api_port = std::stoi(argv[++i]);
+            } catch (const std::exception &) {
+                std::cerr << "错误: --apiport 必须是有效整数端口" << std::endl;
+                return 1;
+            }
+            if (api_port <= 0 || api_port > 65535) {
+                std::cerr << "错误: --apiport 必须在 1 到 65535 之间" << std::endl;
+                return 1;
+            }
+        } else if (key.rfind("--apiport=", 0) == 0) {
+            try {
+                api_port = std::stoi(key.substr(std::string("--apiport=").size()));
+            } catch (const std::exception &) {
+                std::cerr << "错误: --apiport 必须是有效整数端口" << std::endl;
+                return 1;
+            }
+            if (api_port <= 0 || api_port > 65535) {
+                std::cerr << "错误: --apiport 必须在 1 到 65535 之间" << std::endl;
+                return 1;
+            }
         } else if (key == "--help" || key == "-h") {
-            std::cout << "用法: ./main [--onnx <model.onnx>] [--model_type <no_prompt|pts|box|box+pts|sota>] [--infer-threads <N>] [--nolog] [--crowdebug]" << std::endl;
+            std::cout << "用法: ./main [--onnx <model.onnx>] [--model_type <no_prompt|pts|box|box+pts|sota>] [--infer-threads <N>] [--apiport <1-65535>] [--nolog] [--crowdebug]" << std::endl;
             return 0;
         }
     }
@@ -79,6 +107,7 @@ int main(int argc, char **argv)
     RuntimeLogger::info("程序启动，参数解析完成");
     RuntimeLogger::info(std::string("推理线程数: ") + std::to_string(infer_threads));
     RuntimeLogger::info("推理模型类型: " + model_type);
+    RuntimeLogger::info(std::string("API监听端口: ") + std::to_string(api_port));
     RuntimeLogger::info(std::string("日志文件保存: ") + (no_log_file ? "关闭" : "开启"));
     RuntimeLogger::info(std::string("Crow日志级别: ") + (crow_debug ? "DEBUG(全量)" : "WARNING及以上"));
     {
@@ -131,8 +160,7 @@ int main(int argc, char **argv)
         return crow::response{res};
     });
 
-    // 监听 18080 端口
-    RuntimeLogger::info("服务启动监听端口: 18080");
-    app.port(18080).multithreaded().run();
+    RuntimeLogger::info(std::string("服务启动监听端口: ") + std::to_string(api_port));
+    app.port(static_cast<uint16_t>(api_port)).multithreaded().run();
     return 0;
 }

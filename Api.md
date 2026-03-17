@@ -3,6 +3,7 @@
 - temp 临时项目接口统一使用 `/api/temp/` 前缀，与正式项目接口分开。
 - 程序每次启动时会自动删除 `db/temp/` 下上一次运行遗留的全部临时项目。
 - 推理模型类型由服务启动参数 `--model_type <no_prompt|pts|box|box+pts|sota>` 控制，也支持 `--model_type=sota` 写法；未传时默认 `sota`。
+- API 监听端口可通过启动参数 `--apiport <1-65535>` 控制，也支持 `--apiport=18080` 写法；未传时默认 `18080`。
 
 ## JSON 模式（info.json）
 - `uuid`: 字符串（RFC UUID）

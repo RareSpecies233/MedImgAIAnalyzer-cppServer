@@ -23,6 +23,7 @@
 - 启动：执行 `./main`
 - 如需推理功能：启动时传入 `--onnx <model.onnx>`
 - 可通过 `--model_type <no_prompt|pts|box|box+pts|sota>` 选择推理模型类型，也支持 `--model_type=sota` 这种写法；未传时默认 `sota`
+- 可通过 `--apiport <1-65535>` 或 `--apiport=18080` 指定 API 监听端口；未传时默认 `18080`
 - HTTP 服务当前使用单监听实例启动；推理并行度仍由 `--infer-threads <N>` 单独控制
 - 如需关闭日志文件保存：启动时传入 `--nolog`
 - 如需开启 Crow 全量日志：启动时传入 `--crowdebug`
