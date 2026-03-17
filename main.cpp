@@ -1,6 +1,7 @@
 // 在include外部模块时需小心，防止重复引入(crow中有引入一些模块)
 
 #include <crow.h>//如果遇到神秘问题可以尝试不要引入全量crow头文件而是只引入需要的
+#include <cctype>
 #include <thread>
 #ifdef _WIN32
 #include <windows.h>
@@ -24,6 +25,7 @@ int main(int argc, char **argv)
     std::cout << "|            CPU推理版本             |" << std::endl;
     std::cout << "======================================" << std::endl;
     std::string onnx_path;
+    std::string model_type = "sota";
     bool no_log_file = false;
     bool crow_debug = false;
     int infer_threads = static_cast<int>(std::thread::hardware_concurrency());
@@ -37,6 +39,14 @@ int main(int argc, char **argv)
                 return 1;
             }
             onnx_path = argv[++i];
+        } else if (key == "--model_type") {
+            if (i + 1 >= argc) {
+                std::cerr << "错误: --model_type 参数缺少类型" << std::endl;
+                return 1;
+            }
+            model_type = argv[++i];
+        } else if (key.rfind("--model_type=", 0) == 0) {
+            model_type = key.substr(std::string("--model_type=").size());
         } else if (key == "--nolog") {
             no_log_file = true;
         } else if (key == "--crowdebug") {
@@ -52,14 +62,23 @@ int main(int argc, char **argv)
                 return 1;
             }
         } else if (key == "--help" || key == "-h") {
-            std::cout << "用法: ./main [--onnx <model.onnx>] [--infer-threads <N>] [--nolog] [--crowdebug]" << std::endl;
+            std::cout << "用法: ./main [--onnx <model.onnx>] [--model_type <no_prompt|pts|box|box+pts|sota>] [--infer-threads <N>] [--nolog] [--crowdebug]" << std::endl;
             return 0;
         }
+    }
+
+    for (char &ch : model_type) {
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    }
+    if (model_type != "no_prompt" && model_type != "pts" && model_type != "box" && model_type != "box+pts" && model_type != "sota") {
+        std::cerr << "错误: --model_type 仅支持 no_prompt、pts、box、box+pts、sota" << std::endl;
+        return 1;
     }
 
     RuntimeLogger::instance().init("db", !no_log_file);
     RuntimeLogger::info("程序启动，参数解析完成");
     RuntimeLogger::info(std::string("推理线程数: ") + std::to_string(infer_threads));
+    RuntimeLogger::info("推理模型类型: " + model_type);
     RuntimeLogger::info(std::string("日志文件保存: ") + (no_log_file ? "关闭" : "开启"));
     RuntimeLogger::info(std::string("Crow日志级别: ") + (crow_debug ? "DEBUG(全量)" : "WARNING及以上"));
     {
@@ -103,7 +122,7 @@ int main(int argc, char **argv)
 
     // 注册项目信息接口（所有路径前缀为 /api/）
     RuntimeLogger::info("开始注册 API 路由");
-    register_info_routes(app, store, onnx_path, infer_threads);
+    register_info_routes(app, store, onnx_path, infer_threads, model_type);
     RuntimeLogger::info("API 路由注册完成");
 
     CROW_ROUTE(app, "/api/health")([](){

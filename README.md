@@ -22,9 +22,18 @@
 - Windows 脚本：仓库中保留了 [build-windows.ps1](build-windows.ps1)
 - 启动：执行 `./main`
 - 如需推理功能：启动时传入 `--onnx <model.onnx>`
+- 可通过 `--model_type <no_prompt|pts|box|box+pts|sota>` 选择推理模型类型，也支持 `--model_type=sota` 这种写法；未传时默认 `sota`
 - HTTP 服务当前使用单监听实例启动；推理并行度仍由 `--infer-threads <N>` 单独控制
 - 如需关闭日志文件保存：启动时传入 `--nolog`
 - 如需开启 Crow 全量日志：启动时传入 `--crowdebug`
+
+## 推理模型类型
+
+- `no_prompt`：仅输入当前切片图像，不附带 box/points 提示
+- `pts`：在当前切片图像基础上，为模型提供点提示输入
+- `box`：在当前切片图像基础上，为模型提供框提示输入
+- `box+pts`：在当前切片图像基础上，同时提供框提示和点提示
+- `sota`：默认模式，使用前一张、当前、后一张切片组成 3 通道输入；若模型需要，也会同时提供框提示和点提示
 
 ## 目录结构
 

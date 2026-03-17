@@ -317,10 +317,14 @@ static inline void convert_npz_to_pngs(const fs::path &npz_path,
                                        const std::string &marked_suffix = "_marked");
 static inline bool is_valid_crop(int xL, int xR, int yL, int yR, int width, int height);
 static inline std::vector<int64_t> run_onnx_inference_mask(const fs::path &onnx_path,
+                                                           const std::vector<fs::path> &source_npz_files,
+                                                           size_t file_index,
                                                            const cnpy::NpyArray &raw_arr,
+                                                           const cnpy::NpyArray *label_arr,
                                                            int img_size,
                                                            int out_size,
-                                                           int infer_threads);
+                                                           int infer_threads,
+                                                           const std::string &model_type);
 static inline void save_npz_with_same_keys(const std::string &src_npz,
                                            const std::string &out_npz,
                                            const std::vector<int64_t> &pred,
@@ -439,7 +443,8 @@ static inline crow::response start_analysis_project_dir_response(const crow::req
                                                                  const fs::path &project_dir,
                                                                  const std::string &project_label,
                                                                  const std::string &onnx_path,
-                                                                 int infer_threads)
+                                                                 int infer_threads,
+                                                                 const std::string &model_type)
 {
     RuntimeLogger::info("[推理流程] 开始: id=" + project_label);
     if (onnx_path.empty()) throw std::runtime_error("未指定onnx文件，无法使用推理功能");
@@ -488,7 +493,8 @@ static inline crow::response start_analysis_project_dir_response(const crow::req
 
     const int out_size = 512;
     const int img_size = 224;
-    for (const auto &src : npz_files) {
+    for (size_t file_index = 0; file_index < npz_files.size(); ++file_index) {
+        const auto &src = npz_files[file_index];
         RuntimeLogger::info("[推理流程] 处理文件: " + src.filename().string() + ", id=" + project_label);
         cnpy::npz_t npz;
         try {
@@ -500,10 +506,19 @@ static inline crow::response start_analysis_project_dir_response(const crow::req
             throw std::runtime_error("npz内容为空: " + src.filename().string());
         }
         const cnpy::NpyArray *raw_arr = find_npz_array(npz, {"image", "img", "raw", "ct", "data", "slice", "input"});
+        const cnpy::NpyArray *label_arr = find_npz_array(npz, {"label", "mask", "seg", "annotation"});
         if (!raw_arr) raw_arr = &npz.begin()->second;
         if (!raw_arr || raw_arr->shape.size() != 2) throw std::runtime_error("npz中未找到2D原始图像");
 
-        std::vector<int64_t> pred = run_onnx_inference_mask(onnx_path, *raw_arr, img_size, out_size, infer_threads);
+        std::vector<int64_t> pred = run_onnx_inference_mask(onnx_path,
+                                                            npz_files,
+                                                            file_index,
+                                                            *raw_arr,
+                                                            label_arr,
+                                                            img_size,
+                                                            out_size,
+                                                            infer_threads,
+                                                            model_type);
         bool has_crop = (mode_val == "semi") && is_valid_crop(semi_xL, semi_xR, semi_yL, semi_yR, out_size, out_size);
         int crop_xL = has_crop ? semi_xL : -1;
         int crop_xR = has_crop ? semi_xR : -1;
@@ -1556,23 +1571,251 @@ static inline std::vector<float> make_input_tensor_chw(const std::vector<double>
     return input;
 }
 
-static inline std::vector<int64_t> run_onnx_inference_mask(const fs::path &onnx_path,
-                                                           const cnpy::NpyArray &raw_arr,
-                                                           int img_size,
-                                                           int out_size,
-                                                           int infer_threads)
-{
+struct PromptSliceData {
+    std::vector<double> image;
+    std::vector<double> label;
     int height = 0;
     int width = 0;
-    std::vector<double> raw = npy_to_double_2d(raw_arr, height, width);
+};
+
+struct PointPromptData {
+    std::vector<float> points;
+    std::vector<int64_t> point_labels;
+};
+
+static inline std::string normalize_model_type_or_throw(std::string model_type)
+{
+    model_type = to_lower_copy(model_type);
+    if (model_type.empty()) model_type = "sota";
+    if (model_type != "no_prompt" &&
+        model_type != "pts" &&
+        model_type != "box" &&
+        model_type != "box+pts" &&
+        model_type != "sota") {
+        throw std::runtime_error("不支持的推理模型类型: " + model_type);
+    }
+    return model_type;
+}
+
+static inline PromptSliceData build_prompt_slice_data(const cnpy::NpyArray &raw_arr,
+                                                      const cnpy::NpyArray *label_arr)
+{
+    PromptSliceData slice;
+    slice.image = npy_to_double_2d(raw_arr, slice.height, slice.width);
+    normalize_image_inplace(slice.image);
+    slice.label.assign(static_cast<size_t>(slice.height) * slice.width, 0.0);
+
+    if (label_arr && label_arr->shape.size() == 2) {
+        int label_h = 0;
+        int label_w = 0;
+        std::vector<double> label = npy_to_double_2d(*label_arr, label_h, label_w);
+        if (label_h == slice.height && label_w == slice.width) {
+            slice.label = std::move(label);
+        }
+    }
+
+    return slice;
+}
+
+static inline PromptSliceData load_prompt_slice_data_from_npz(const fs::path &npz_path)
+{
+    cnpy::npz_t npz = cnpy::npz_load(npz_path.string());
+    if (npz.empty()) {
+        throw std::runtime_error("npz内容为空: " + npz_path.string());
+    }
+    const cnpy::NpyArray *raw_arr = find_npz_array(npz, {"image", "img", "raw", "ct", "data", "slice", "input"});
+    if (!raw_arr) raw_arr = &npz.begin()->second;
+    const cnpy::NpyArray *label_arr = find_npz_array(npz, {"label", "mask", "seg", "annotation"});
+    if (!raw_arr || raw_arr->shape.size() != 2) {
+        throw std::runtime_error("npz中未找到2D原始图像: " + npz_path.string());
+    }
+    return build_prompt_slice_data(*raw_arr, label_arr);
+}
+
+static inline std::vector<float> build_model_input_tensor(const std::vector<fs::path> &source_npz_files,
+                                                          size_t file_index,
+                                                          const std::string &model_type,
+                                                          const PromptSliceData &current_slice,
+                                                          int img_size)
+{
+    const size_t channel_size = static_cast<size_t>(img_size) * img_size;
+    std::vector<float> tensor(static_cast<size_t>(3) * channel_size, 0.0f);
+
+    auto copy_channel = [&](size_t channel, const PromptSliceData &slice) {
+        const std::vector<double> resized = resize_image(slice.image, slice.height, slice.width, img_size);
+        for (size_t index = 0; index < channel_size; ++index) {
+            tensor[channel * channel_size + index] = static_cast<float>(resized[index]);
+        }
+    };
+
+    if (model_type == "sota" && !source_npz_files.empty()) {
+        const size_t prev_index = (file_index == 0) ? 0 : (file_index - 1);
+        const size_t next_index = (file_index + 1 >= source_npz_files.size()) ? (source_npz_files.size() - 1) : (file_index + 1);
+        copy_channel(0, load_prompt_slice_data_from_npz(source_npz_files[prev_index]));
+        copy_channel(1, current_slice);
+        copy_channel(2, load_prompt_slice_data_from_npz(source_npz_files[next_index]));
+    } else {
+        copy_channel(0, current_slice);
+        copy_channel(1, current_slice);
+        copy_channel(2, current_slice);
+    }
+
+    return tensor;
+}
+
+static inline std::vector<float> build_box_prompt_from_label(const std::vector<double> &label,
+                                                             int height,
+                                                             int width,
+                                                             int img_size)
+{
+    size_t min_x = static_cast<size_t>(width);
+    size_t max_x = 0;
+    size_t min_y = static_cast<size_t>(height);
+    size_t max_y = 0;
+    bool found = false;
+
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            if (label[static_cast<size_t>(y) * width + x] > 0.0) {
+                found = true;
+                min_x = std::min(min_x, static_cast<size_t>(x));
+                max_x = std::max(max_x, static_cast<size_t>(x));
+                min_y = std::min(min_y, static_cast<size_t>(y));
+                max_y = std::max(max_y, static_cast<size_t>(y));
+            }
+        }
+    }
+
+    if (!found) {
+        const float center = static_cast<float>(img_size / 2);
+        return {center - 1.0f, center - 1.0f, center + 1.0f, center + 1.0f};
+    }
+
+    constexpr size_t margin = 2;
+    min_x = (min_x > margin) ? (min_x - margin) : 0;
+    min_y = (min_y > margin) ? (min_y - margin) : 0;
+    max_x = std::min(static_cast<size_t>(width), max_x + margin);
+    max_y = std::min(static_cast<size_t>(height), max_y + margin);
+
+    return {
+        static_cast<float>(static_cast<double>(min_x) * img_size / width),
+        static_cast<float>(static_cast<double>(min_y) * img_size / height),
+        static_cast<float>(static_cast<double>(max_x) * img_size / width),
+        static_cast<float>(static_cast<double>(max_y) * img_size / height)
+    };
+}
+
+static inline std::vector<std::array<float, 2>> sample_class_points(const std::vector<int64_t> &mask,
+                                                                    int img_size,
+                                                                    int class_index)
+{
+    constexpr int kPointsPerClass = 10;
+    std::vector<std::array<float, 2>> points;
+    points.reserve(static_cast<size_t>(img_size) * img_size / 8);
+    for (int y = 0; y < img_size; ++y) {
+        for (int x = 0; x < img_size; ++x) {
+            if (mask[static_cast<size_t>(y) * img_size + x] == class_index) {
+                points.push_back({static_cast<float>(y), static_cast<float>(x)});
+            }
+        }
+    }
+
+    if (points.empty()) {
+        return {};
+    }
+
+    const size_t step = std::max(points.size() / static_cast<size_t>(kPointsPerClass), static_cast<size_t>(1));
+    std::vector<std::array<float, 2>> sampled;
+    sampled.reserve(kPointsPerClass);
+    for (int index = 0; index < kPointsPerClass; ++index) {
+        const size_t sample_index = std::min(static_cast<size_t>(index) * step, points.size() - 1);
+        sampled.push_back(points[sample_index]);
+    }
+    return sampled;
+}
+
+static inline PointPromptData build_point_prompt_from_label(const std::vector<double> &label,
+                                                            int height,
+                                                            int width,
+                                                            int img_size,
+                                                            int expected_count)
+{
+    constexpr int kPointsPerClass = 10;
+    constexpr int kClassCount = 2;
+
+    const std::vector<int64_t> resized_mask = resize_mask_nearest_from_double(label, height, width, img_size);
+    std::vector<std::vector<std::array<float, 2>>> groups;
+    groups.reserve(kClassCount);
+    for (int class_index = 1; class_index <= kClassCount; ++class_index) {
+        auto sampled = sample_class_points(resized_mask, img_size, class_index);
+        if (!sampled.empty()) {
+            groups.push_back(std::move(sampled));
+        }
+    }
+
+    if (groups.empty()) {
+        const std::array<float, 2> center = {static_cast<float>(img_size / 2), static_cast<float>(img_size / 2)};
+        groups = {
+            std::vector<std::array<float, 2>>(kPointsPerClass, center),
+            std::vector<std::array<float, 2>>(kPointsPerClass, center)
+        };
+    } else if (groups.size() == 1) {
+        groups.push_back(groups.front());
+    }
+
+    PointPromptData prompt;
+    for (const auto &group : groups) {
+        for (const int selected_index : {0, 4, 8}) {
+            const auto &point = group[static_cast<size_t>(selected_index)];
+            prompt.points.push_back(point[0]);
+            prompt.points.push_back(point[1]);
+            prompt.point_labels.push_back(1);
+        }
+    }
+
+    if (expected_count == 7) {
+        prompt.points.push_back(0.0f);
+        prompt.points.push_back(0.0f);
+        prompt.point_labels.push_back(-1);
+    } else if (expected_count < static_cast<int>(prompt.point_labels.size())) {
+        prompt.points.resize(static_cast<size_t>(expected_count) * 2);
+        prompt.point_labels.resize(static_cast<size_t>(expected_count));
+    } else {
+        while (static_cast<int>(prompt.point_labels.size()) < expected_count) {
+            const float last_y = prompt.points[prompt.points.size() - 2];
+            const float last_x = prompt.points[prompt.points.size() - 1];
+            prompt.points.push_back(last_y);
+            prompt.points.push_back(last_x);
+            prompt.point_labels.push_back(1);
+        }
+    }
+
+    return prompt;
+}
+
+static inline std::vector<int64_t> run_onnx_inference_mask(const fs::path &onnx_path,
+                                                           const std::vector<fs::path> &source_npz_files,
+                                                           size_t file_index,
+                                                           const cnpy::NpyArray &raw_arr,
+                                                           const cnpy::NpyArray *label_arr,
+                                                           int img_size,
+                                                           int out_size,
+                                                           int infer_threads,
+                                                           const std::string &model_type)
+{
+    const std::string normalized_model_type = normalize_model_type_or_throw(model_type);
+    PromptSliceData current_slice = build_prompt_slice_data(raw_arr, label_arr);
     RuntimeLogger::info("[推理] 开始ONNX推理: model=" + onnx_path.string() +
-                        ", input_rows=" + std::to_string(height) +
-                        ", input_cols=" + std::to_string(width) +
+                        ", model_type=" + normalized_model_type +
+                        ", input_rows=" + std::to_string(current_slice.height) +
+                        ", input_cols=" + std::to_string(current_slice.width) +
                         ", img_size=" + std::to_string(img_size) +
                         ", out_size=" + std::to_string(out_size));
-    normalize_image_inplace(raw);
-    std::vector<double> resized = resize_image(raw, height, width, img_size);
-    std::vector<float> input_chw = make_input_tensor_chw(resized, img_size, 3);
+    std::vector<float> image_tensor = build_model_input_tensor(source_npz_files,
+                                                               file_index,
+                                                               normalized_model_type,
+                                                               current_slice,
+                                                               img_size);
 
     Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "medimg_infer");
     Ort::SessionOptions opts;
@@ -1601,11 +1844,74 @@ static inline std::vector<int64_t> run_onnx_inference_mask(const fs::path &onnx_
     if (input_count == 0) {
         throw std::runtime_error("ONNX模型缺少输入");
     }
-    Ort::AllocatedStringPtr input_name = session.GetInputNameAllocated(0, allocator);
-    std::vector<int64_t> input_shape = {1, 3, img_size, img_size};
-    Ort::MemoryInfo mem_info = Ort::MemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
-    Ort::Value input_tensor = Ort::Value::CreateTensor<float>(
-        mem_info, input_chw.data(), input_chw.size(), input_shape.data(), input_shape.size());
+
+    std::vector<std::string> input_name_storage;
+    std::vector<const char *> input_name_cstrs;
+    input_name_storage.reserve(input_count);
+    input_name_cstrs.reserve(input_count);
+    int point_count = 6;
+    for (size_t index = 0; index < input_count; ++index) {
+        auto input_name = session.GetInputNameAllocated(index, allocator);
+        input_name_storage.emplace_back(input_name.get());
+        input_name_cstrs.push_back(input_name_storage.back().c_str());
+        if (input_name_storage.back() == "points") {
+            auto shape = session.GetInputTypeInfo(index).GetTensorTypeAndShapeInfo().GetShape();
+            if (shape.size() > 1 && shape[1] > 0) {
+                point_count = static_cast<int>(shape[1]);
+            }
+        }
+    }
+
+    std::vector<float> boxes = build_box_prompt_from_label(current_slice.label,
+                                                           current_slice.height,
+                                                           current_slice.width,
+                                                           img_size);
+    PointPromptData point_prompt = build_point_prompt_from_label(current_slice.label,
+                                                                 current_slice.height,
+                                                                 current_slice.width,
+                                                                 img_size,
+                                                                 point_count);
+
+    const std::array<int64_t, 4> image_shape = {1, 3, img_size, img_size};
+    const std::array<int64_t, 2> box_shape = {1, 4};
+    const std::array<int64_t, 3> point_shape = {1, point_count, 2};
+    const std::array<int64_t, 2> point_label_shape = {1, point_count};
+    Ort::MemoryInfo mem_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+    std::vector<Ort::Value> input_tensors;
+    input_tensors.reserve(input_name_storage.size());
+    for (const auto &input_name : input_name_storage) {
+        if (input_name == "image" || input_name == "input") {
+            input_tensors.emplace_back(Ort::Value::CreateTensor<float>(
+                mem_info,
+                image_tensor.data(),
+                image_tensor.size(),
+                image_shape.data(),
+                image_shape.size()));
+        } else if (input_name == "boxes") {
+            input_tensors.emplace_back(Ort::Value::CreateTensor<float>(
+                mem_info,
+                boxes.data(),
+                boxes.size(),
+                box_shape.data(),
+                box_shape.size()));
+        } else if (input_name == "points") {
+            input_tensors.emplace_back(Ort::Value::CreateTensor<float>(
+                mem_info,
+                point_prompt.points.data(),
+                point_prompt.points.size(),
+                point_shape.data(),
+                point_shape.size()));
+        } else if (input_name == "point_labels" || input_name == "labels") {
+            input_tensors.emplace_back(Ort::Value::CreateTensor<int64_t>(
+                mem_info,
+                point_prompt.point_labels.data(),
+                point_prompt.point_labels.size(),
+                point_label_shape.data(),
+                point_label_shape.size()));
+        } else {
+            throw std::runtime_error("不支持的ONNX输入名: " + input_name);
+        }
+    }
 
     size_t output_count = session.GetOutputCount();
     if (output_count == 0) {
@@ -1620,11 +1926,10 @@ static inline std::vector<int64_t> run_onnx_inference_mask(const fs::path &onnx_
         output_name_cstrs.push_back(output_names.back().get());
     }
 
-    const char *input_name_cstr = input_name.get();
     std::vector<Ort::Value> outputs = session.Run(Ort::RunOptions{nullptr},
-                                                  &input_name_cstr,
-                                                  &input_tensor,
-                                                  1,
+                                                  input_name_cstrs.data(),
+                                                  input_tensors.data(),
+                                                  input_tensors.size(),
                                                   output_name_cstrs.data(),
                                                   output_count);
     if (outputs.empty()) {
@@ -1634,19 +1939,8 @@ static inline std::vector<int64_t> run_onnx_inference_mask(const fs::path &onnx_
     Ort::Value &out = outputs[0];
     auto out_info = out.GetTensorTypeAndShapeInfo();
     auto out_shape = out_info.GetShape();
-    if (out_shape.size() != 4) {
+    if (out_shape.size() != 3 && out_shape.size() != 4) {
         throw std::runtime_error("ONNX输出维度不符合预期");
-    }
-
-    int64_t out_n = out_shape[0];
-    int64_t out_c = out_shape[1];
-    int64_t out_h = out_shape[2];
-    int64_t out_w = out_shape[3];
-    if (out_n != 1) {
-        throw std::runtime_error("ONNX输出batch不为1");
-    }
-    if (out_c <= 0 || out_h <= 0 || out_w <= 0) {
-        throw std::runtime_error("ONNX输出形状非法");
     }
 
     auto half_to_float = [](uint16_t h) -> float {
@@ -1685,7 +1979,13 @@ static inline std::vector<int64_t> run_onnx_inference_mask(const fs::path &onnx_
         out_data = out.GetTensorData<float>();
     } else if (out_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
         const uint16_t *src = out.GetTensorData<uint16_t>();
-        size_t total = static_cast<size_t>(out_n * out_c * out_h * out_w);
+        size_t total = 1;
+        for (int64_t dim : out_shape) {
+            if (dim <= 0) {
+                throw std::runtime_error("ONNX输出形状非法");
+            }
+            total *= static_cast<size_t>(dim);
+        }
         out_fallback.resize(total);
         for (size_t i = 0; i < total; ++i) {
             out_fallback[i] = half_to_float(src[i]);
@@ -1699,7 +1999,28 @@ static inline std::vector<int64_t> run_onnx_inference_mask(const fs::path &onnx_
         throw std::runtime_error("ONNX输出数据为空");
     }
 
-    size_t total_vals = static_cast<size_t>(out_n * out_c * out_h * out_w);
+    int64_t out_classes = 1;
+    int64_t out_h = 0;
+    int64_t out_w = 0;
+    size_t total_vals = 0;
+    if (out_shape.size() == 4) {
+        const int64_t out_n = out_shape[0];
+        out_classes = out_shape[1];
+        out_h = out_shape[2];
+        out_w = out_shape[3];
+        if (out_n != 1) {
+            throw std::runtime_error("ONNX输出batch不为1");
+        }
+        total_vals = static_cast<size_t>(out_n * out_classes * out_h * out_w);
+    } else {
+        out_classes = 1;
+        out_h = out_shape[1];
+        out_w = out_shape[2];
+        total_vals = static_cast<size_t>(out_shape[0] * out_h * out_w);
+    }
+    if (out_classes <= 0 || out_h <= 0 || out_w <= 0) {
+        throw std::runtime_error("ONNX输出形状非法");
+    }
     if (total_vals == 0) {
         throw std::runtime_error("ONNX输出张量为空");
     }
@@ -1713,7 +2034,7 @@ static inline std::vector<int64_t> run_onnx_inference_mask(const fs::path &onnx_
         if (v > out_max) out_max = v;
     }
 
-    if (out_c == 1) {
+    if (out_classes == 1) {
         bool already_prob = (out_min >= 0.0f && out_max <= 1.0f);
         for (int64_t y = 0; y < out_h; ++y) {
             for (int64_t x = 0; x < out_w; ++x) {
@@ -1726,9 +2047,9 @@ static inline std::vector<int64_t> run_onnx_inference_mask(const fs::path &onnx_
         for (int64_t y = 0; y < out_h; ++y) {
             for (int64_t x = 0; x < out_w; ++x) {
                 int64_t best_c = 0;
-                float best_v = out_data[(0 * out_c + 0) * out_h * out_w + y * out_w + x];
-                for (int64_t c = 1; c < out_c; ++c) {
-                    float v = out_data[(0 * out_c + c) * out_h * out_w + y * out_w + x];
+                float best_v = out_data[y * out_w + x];
+                for (int64_t c = 1; c < out_classes; ++c) {
+                    float v = out_data[c * out_h * out_w + y * out_w + x];
                     if (v > best_v) {
                         best_v = v;
                         best_c = c;
@@ -3552,7 +3873,7 @@ static inline std::string llm_chat_completion(const LlmSettings &settings,
 #include "project_advanced_api.h"
 
 template <typename App>
-inline void register_info_routes(App &app, InfoStore &store, const std::string &onnx_path, int infer_threads) {
+inline void register_info_routes(App &app, InfoStore &store, const std::string &onnx_path, int infer_threads, const std::string &model_type) {
     RuntimeLogger::info("register_info_routes 开始执行");
     fs::create_directories(rag_db_dir(store));
     if (!fs::exists(llm_settings_path(store))) {
@@ -3560,10 +3881,10 @@ inline void register_info_routes(App &app, InfoStore &store, const std::string &
         save_llm_settings(store, default_llm_settings());
     }
 
-    register_temp_basic_routes(app, store, onnx_path, infer_threads);
+    register_temp_basic_routes(app, store, onnx_path, infer_threads, model_type);
     register_temp_advanced_routes(app, store);
     register_project_llm_routes(app, store);
-    register_project_basic_routes(app, store, onnx_path, infer_threads);
+    register_project_basic_routes(app, store, onnx_path, infer_threads, model_type);
     register_project_advanced_routes(app, store);
 
     // CORS 预检（OPTIONS）

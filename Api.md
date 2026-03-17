@@ -2,6 +2,7 @@
 - 所有接口均以 `/api/` 为前缀（服务器已配置为使用该前缀）。
 - temp 临时项目接口统一使用 `/api/temp/` 前缀，与正式项目接口分开。
 - 程序每次启动时会自动删除 `db/temp/` 下上一次运行遗留的全部临时项目。
+- 推理模型类型由服务启动参数 `--model_type <no_prompt|pts|box|box+pts|sota>` 控制，也支持 `--model_type=sota` 写法；未传时默认 `sota`。
 
 ## JSON 模式（info.json）
 - `uuid`: 字符串（RFC UUID）
@@ -234,6 +235,8 @@
 	- `processed/dcm`、`processed/nii`、`3d` 不会在推理阶段直接生成，而是在对应下载或 3D 请求到来时按需生成
 	- 每次推理都会清理旧的 `processed/`、`3d/`、`OG3d/` 结果，并将 `PD-dcm`、`PD-nii`、`PD-3d` 重置为 `false`
 	- `project.json` 的 `processed` 与 `PD` 会更新为 `raw` 或 `semi`
+	- 具体使用的推理模型类型由服务启动参数 `--model_type` 决定：`no_prompt`、`pts`、`box`、`box+pts`、`sota`
+	- `sota` 为默认模式，会使用前一张、当前、后一张切片组成 3 通道输入；其余四种模式使用当前切片复制为 3 通道输入
 - 返回：200，`{ "status": "ok" }`
 
 12) 获取处理过的图片列表

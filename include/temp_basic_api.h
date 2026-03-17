@@ -4,7 +4,8 @@ template <typename App>
 inline void register_temp_basic_routes(App &app,
                                        InfoStore &store,
                                        const std::string &onnx_path,
-                                       int infer_threads)
+                                       int infer_threads,
+                                       const std::string &model_type)
 {
     CROW_ROUTE(app, "/api/temp/create").methods(crow::HTTPMethod::POST)([&store](const crow::request &req) {
         try {
@@ -84,13 +85,14 @@ inline void register_temp_basic_routes(App &app,
         }
     });
 
-    CROW_ROUTE(app, "/api/temp/<string>/start_analysis").methods(crow::HTTPMethod::POST)([&store, onnx_path, infer_threads](const crow::request &req, const std::string &temp_uuid) {
+    CROW_ROUTE(app, "/api/temp/<string>/start_analysis").methods(crow::HTTPMethod::POST)([&store, onnx_path, infer_threads, model_type](const crow::request &req, const std::string &temp_uuid) {
         try {
             return start_analysis_project_dir_response(req,
                                                        require_temp_project_dir(store, temp_uuid),
                                                        std::string("temp:") + temp_uuid,
                                                        onnx_path,
-                                                       infer_threads);
+                                                       infer_threads,
+                                                       model_type);
         } catch (const std::exception &e) {
             return make_json_error_response(e.what());
         } catch (...) {

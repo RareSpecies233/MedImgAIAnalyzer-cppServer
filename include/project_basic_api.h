@@ -4,7 +4,8 @@ template <typename App>
 inline void register_project_basic_routes(App &app,
                                           InfoStore &store,
                                           const std::string &onnx_path,
-                                          int infer_threads)
+                                          int infer_threads,
+                                          const std::string &model_type)
 {
     auto require_project_dir = [&store](const std::string &uuid) -> fs::path {
         if (!store.exists(uuid)) throw std::runtime_error("project not found");
@@ -168,9 +169,9 @@ inline void register_project_basic_routes(App &app,
         }
     });
 
-    CROW_ROUTE(app, "/api/project/<string>/start_analysis").methods(crow::HTTPMethod::POST)([require_project_dir, onnx_path, infer_threads](const crow::request &req, const std::string &uuid){
+    CROW_ROUTE(app, "/api/project/<string>/start_analysis").methods(crow::HTTPMethod::POST)([require_project_dir, onnx_path, infer_threads, model_type](const crow::request &req, const std::string &uuid){
         try {
-            return start_analysis_project_dir_response(req, require_project_dir(uuid), uuid, onnx_path, infer_threads);
+            return start_analysis_project_dir_response(req, require_project_dir(uuid), uuid, onnx_path, infer_threads, model_type);
         } catch (const std::exception &e) {
             crow::response r{std::string("{\"error\":\"") + e.what() + "\"}"};
             r.code = 400;
