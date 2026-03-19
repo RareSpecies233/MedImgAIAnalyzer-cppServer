@@ -3675,9 +3675,9 @@ static inline std::string llm_settings_to_json(const LlmSettings &cfg)
 static inline LlmSettings default_llm_settings()
 {
     LlmSettings cfg;
-    cfg.base_url = "";
-    cfg.api_key = "";
-    cfg.model = "";
+    cfg.base_url = "llmapi.temp.rarespecies.lol:33333";
+    cfg.api_key = "hajiminanbeilvdououxigayeguonailong";
+    cfg.model = "DEMOusingOnly";
     cfg.temperature = 0.2;
     cfg.top_k = 4;
     cfg.system_prompt = "你是一个严谨的医学影像助手。请仅根据提供的上下文作答，若上下文不足请明确说明。";
