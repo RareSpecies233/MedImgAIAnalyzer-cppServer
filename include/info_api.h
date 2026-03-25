@@ -3089,21 +3089,117 @@ static inline std::string strip_markup_to_text(std::string markup)
     return trim_copy(markup);
 }
 
+static inline void extract_zip_archive_to_dir(const fs::path &archive_path,
+                                              const fs::path &output_dir,
+                                              const std::string &archive_label)
+{
+    if (!fs::exists(archive_path)) {
+        throw std::runtime_error(archive_label + " 文件不存在");
+    }
+
+    std::error_code ec;
+    fs::remove_all(output_dir, ec);
+    ec.clear();
+    fs::create_directories(output_dir, ec);
+    if (ec) {
+        throw std::runtime_error(archive_label + " 临时目录创建失败: " + ec.message());
+    }
+
+    RuntimeLogger::info("[RAG][" + archive_label + "] 开始解压: src=" + archive_path.string() +
+                        ", dst=" + output_dir.string());
+
+    int extract_exit = -1;
+    std::string extract_output;
+
+#ifdef _WIN32
+    std::string src = powershell_single_quote_escape(archive_path.string());
+    std::string dst = powershell_single_quote_escape(output_dir.string());
+
+    if (command_exists("7z")) {
+        std::string extract_cmd =
+            "powershell -NoProfile -NonInteractive -Command \""
+            "$ErrorActionPreference='Stop'; "
+            "$src='" + src + "'; "
+            "$dst='" + dst + "'; "
+            "if (Test-Path -LiteralPath $dst) { Remove-Item -LiteralPath $dst -Recurse -Force }; "
+            "New-Item -ItemType Directory -Path $dst -Force | Out-Null; "
+            "& 7z x -y ('-o' + $dst) -- $src * | Out-Null\"";
+        auto extract_out = run_command_capture(extract_cmd);
+        extract_exit = extract_out.exit_code;
+        extract_output = extract_out.output;
+    }
+
+    if (extract_exit != 0) {
+        std::string extract_cmd =
+            "powershell -NoProfile -NonInteractive -Command \""
+            "$ErrorActionPreference='Stop'; "
+            "Add-Type -AssemblyName System.IO.Compression.FileSystem; "
+            "$src='" + src + "'; "
+            "$dst='" + dst + "'; "
+            "if (Test-Path -LiteralPath $dst) { Remove-Item -LiteralPath $dst -Recurse -Force }; "
+            "New-Item -ItemType Directory -Path $dst -Force | Out-Null; "
+            "[System.IO.Compression.ZipFile]::ExtractToDirectory($src, $dst)\"";
+        auto extract_out = run_command_capture(extract_cmd);
+        extract_exit = extract_out.exit_code;
+        extract_output = extract_out.output;
+    }
+#else
+    if (command_exists("7z")) {
+        std::string cmd = "7z x -y -o" + shell_escape(output_dir.string()) + " " +
+                          shell_escape(archive_path.string()) + " >/dev/null";
+        auto extract_out = run_command_capture(cmd);
+        extract_exit = extract_out.exit_code;
+        extract_output = extract_out.output;
+    } else if (command_exists("unzip")) {
+        std::string cmd = "unzip -qq -o " + shell_escape(archive_path.string()) +
+                          " -d " + shell_escape(output_dir.string()) + " >/dev/null";
+        auto extract_out = run_command_capture(cmd);
+        extract_exit = extract_out.exit_code;
+        extract_output = extract_out.output;
+    } else if (command_exists("bsdtar")) {
+        std::string cmd = "bsdtar -xf " + shell_escape(archive_path.string()) +
+                          " -C " + shell_escape(output_dir.string()) + " >/dev/null 2>&1";
+        auto extract_out = run_command_capture(cmd);
+        extract_exit = extract_out.exit_code;
+        extract_output = extract_out.output;
+    }
+#endif
+
+    if (extract_exit != 0) {
+        RuntimeLogger::error("[RAG][" + archive_label + "] 解压失败: " + trim_copy(extract_output));
+        throw std::runtime_error(archive_label + " 解压失败");
+    }
+
+    RuntimeLogger::info("[RAG][" + archive_label + "] 解压完成");
+}
+
 static inline std::string extract_text_from_docx(const fs::path &path)
 {
-    if (!command_exists("unzip")) {
-        throw std::runtime_error("解析 DOCX 需要 unzip");
+    fs::path temp_dir = fs::temp_directory_path() / ("rag_docx_" + random_hex_id(10));
+    auto cleanup = [&]() {
+        std::error_code ec;
+        fs::remove_all(temp_dir, ec);
+    };
+
+    try {
+        extract_zip_archive_to_dir(path, temp_dir, "DOCX");
+        fs::path document_xml = temp_dir / "word" / "document.xml";
+        if (!fs::exists(document_xml)) {
+            throw std::runtime_error("DOCX 缺少 word/document.xml");
+        }
+
+        std::string raw = read_text_file(document_xml);
+        raw.erase(std::remove(raw.begin(), raw.end(), '\0'), raw.end());
+        std::string text = strip_markup_to_text(raw);
+        if (text.empty()) {
+            throw std::runtime_error("DOCX 未提取到可用文本");
+        }
+        cleanup();
+        return text;
+    } catch (...) {
+        cleanup();
+        throw;
     }
-    std::string cmd = "unzip -p " + shell_escape(path.string()) + " word/document.xml 2>/dev/null";
-    auto out = run_command_capture(cmd);
-    if (out.exit_code != 0) {
-        throw std::runtime_error("DOCX 解析失败");
-    }
-    std::string text = strip_markup_to_text(out.output);
-    if (text.empty()) {
-        throw std::runtime_error("DOCX 未提取到可用文本");
-    }
-    return text;
 }
 
 static inline std::string extract_text_from_doc(const fs::path &path)
@@ -3131,98 +3227,14 @@ static inline std::string extract_text_from_epub(const fs::path &path)
                 lower.rfind(".html") == lower.size() - 5 ||
                 lower.rfind(".htm") == lower.size() - 4);
     };
-
-    if (command_exists("unzip")) {
-        std::string list_cmd = "unzip -Z1 " + shell_escape(path.string()) + " 2>/dev/null";
-        auto list_out = run_command_capture(list_cmd);
-        if (list_out.exit_code != 0) {
-            throw std::runtime_error("EPUB 条目读取失败");
-        }
-
-        std::vector<std::string> entries;
-        std::istringstream ss(list_out.output);
-        for (std::string line; std::getline(ss, line); ) {
-            line = trim_copy(line);
-            if (line.empty()) continue;
-            std::string lower = to_lower_copy(line);
-            if (is_html_like(lower)) {
-                entries.push_back(line);
-            }
-        }
-
-        if (entries.empty()) {
-            throw std::runtime_error("EPUB 未找到可读章节");
-        }
-
-        std::ostringstream joined;
-        int used = 0;
-        for (const auto &entry : entries) {
-            if (used >= 300) break;
-            std::string cmd = "unzip -p " + shell_escape(path.string()) + " " + shell_escape(entry) + " 2>/dev/null";
-            auto part_out = run_command_capture(cmd);
-            if (part_out.exit_code != 0) continue;
-            std::string part = strip_markup_to_text(part_out.output);
-            if (part.empty()) continue;
-            if (used > 0) joined << "\\n\\n";
-            joined << part;
-            ++used;
-        }
-
-        std::string text = trim_copy(joined.str());
-        if (text.empty()) {
-            throw std::runtime_error("EPUB 未提取到可用文本");
-        }
-        return text;
-    }
-
-#ifdef _WIN32
     fs::path temp_dir = fs::temp_directory_path() / ("rag_epub_" + random_hex_id(10));
-    fs::create_directories(temp_dir);
-
     auto cleanup = [&]() {
         std::error_code ec;
         fs::remove_all(temp_dir, ec);
     };
 
     try {
-        std::string src = powershell_single_quote_escape(path.string());
-        std::string dst = powershell_single_quote_escape(temp_dir.string());
-        int extract_exit = -1;
-        std::string extract_output;
-
-        if (command_exists("7z")) {
-            std::string extract_cmd =
-                "powershell -NoProfile -NonInteractive -Command \""
-                "$ErrorActionPreference='Stop'; "
-                "$src='" + src + "'; "
-                "$dst='" + dst + "'; "
-                "if (!(Test-Path -LiteralPath $dst)) { New-Item -ItemType Directory -Path $dst -Force | Out-Null }; "
-                "& 7z x -y ('-o' + $dst) -- $src * | Out-Null\"";
-            auto extract_out = run_command_capture(extract_cmd);
-            extract_exit = extract_out.exit_code;
-            extract_output = extract_out.output;
-        }
-
-        if (extract_exit != 0) {
-            std::string extract_cmd =
-                "powershell -NoProfile -NonInteractive -Command \""
-                "$ErrorActionPreference='Stop'; "
-                "Add-Type -AssemblyName System.IO.Compression.FileSystem; "
-                "$src='" + src + "'; "
-                "$dst='" + dst + "'; "
-                "if (Test-Path -LiteralPath $dst) { Remove-Item -LiteralPath $dst -Recurse -Force }; "
-                "New-Item -ItemType Directory -Path $dst -Force | Out-Null; "
-                "[System.IO.Compression.ZipFile]::ExtractToDirectory($src, $dst)\"";
-            auto extract_out = run_command_capture(extract_cmd);
-            extract_exit = extract_out.exit_code;
-            extract_output = extract_out.output;
-        }
-
-        if (extract_exit != 0) {
-            RuntimeLogger::error("[RAG][EPUB] Windows解压失败: " + trim_copy(extract_output));
-            cleanup();
-            throw std::runtime_error("EPUB 解压失败");
-        }
+        extract_zip_archive_to_dir(path, temp_dir, "EPUB");
 
         std::vector<fs::path> entries;
         for (auto &entry : fs::recursive_directory_iterator(temp_dir)) {
@@ -3262,9 +3274,6 @@ static inline std::string extract_text_from_epub(const fs::path &path)
         cleanup();
         throw;
     }
-#else
-    throw std::runtime_error("解析 EPUB 需要 unzip");
-#endif
 }
 
 static inline std::string extract_text_for_rag(const fs::path &path)
