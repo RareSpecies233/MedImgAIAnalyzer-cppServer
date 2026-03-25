@@ -22,6 +22,7 @@
 #include <unordered_set>
 #include <regex>
 #include <cstdio>
+#include <cstdlib>
 #include <optional>
 #ifndef _WIN32
 #include <sys/wait.h>
@@ -2256,6 +2257,136 @@ static inline std::string powershell_single_quote_escape(const std::string &s)
 static inline bool command_exists(const std::string &cmd);
 static inline std::string random_hex_id(std::size_t length);
 
+static inline std::optional<std::string> get_env_copy(const char *name)
+{
+    const char *value = std::getenv(name);
+    if (!value || *value == '\0') return std::nullopt;
+    return std::string(value);
+}
+
+static inline std::vector<fs::path> command_candidate_paths(const fs::path &base, const std::string &cmd)
+{
+    std::vector<fs::path> candidates;
+    if (base.empty()) return candidates;
+
+    candidates.push_back(base);
+    candidates.push_back(base / cmd);
+    candidates.push_back(base / "bin" / cmd);
+    candidates.push_back(base / "tools" / cmd);
+    candidates.push_back(base / "tools" / "bin" / cmd);
+    candidates.push_back(base / "Library" / "bin" / cmd);
+
+#ifdef _WIN32
+    if (base.extension() != ".exe") {
+        candidates.push_back(base / (cmd + ".exe"));
+        candidates.push_back(base / "bin" / (cmd + ".exe"));
+        candidates.push_back(base / "tools" / (cmd + ".exe"));
+        candidates.push_back(base / "tools" / "bin" / (cmd + ".exe"));
+        candidates.push_back(base / "tools" / cmd / (cmd + ".exe"));
+        candidates.push_back(base / "tools" / cmd / "bin" / (cmd + ".exe"));
+        candidates.push_back(base / "tools" / "poppler" / "bin" / (cmd + ".exe"));
+        candidates.push_back(base / "tools" / "poppler" / "Library" / "bin" / (cmd + ".exe"));
+        candidates.push_back(base / "tools" / "curl" / (cmd + ".exe"));
+        candidates.push_back(base / "tools" / "curl" / "bin" / (cmd + ".exe"));
+        candidates.push_back(base / "Library" / "bin" / (cmd + ".exe"));
+    }
+#endif
+
+    return candidates;
+}
+
+static inline std::optional<fs::path> resolve_command_hint(const fs::path &hint, const std::string &cmd)
+{
+    std::error_code ec;
+    for (const auto &candidate : command_candidate_paths(hint, cmd)) {
+        if (!candidate.empty() && fs::exists(candidate, ec) && fs::is_regular_file(candidate, ec)) {
+            return candidate;
+        }
+        ec.clear();
+    }
+    return std::nullopt;
+}
+
+static inline std::optional<fs::path> current_executable_dir()
+{
+#ifdef _WIN32
+    std::wstring buffer(MAX_PATH, L'\0');
+    DWORD length = 0;
+    while (true) {
+        length = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
+        if (length == 0) return std::nullopt;
+        if (length < buffer.size() - 1) break;
+        buffer.resize(buffer.size() * 2, L'\0');
+    }
+    buffer.resize(length);
+    return fs::path(buffer).parent_path();
+#else
+    return std::nullopt;
+#endif
+}
+
+static inline std::optional<fs::path> find_command_on_path(const std::string &cmd)
+{
+    auto path_env = get_env_copy("PATH");
+    if (!path_env) return std::nullopt;
+
+#ifdef _WIN32
+    const char separator = ';';
+#else
+    const char separator = ':';
+#endif
+
+    std::size_t start = 0;
+    while (start <= path_env->size()) {
+        std::size_t end = path_env->find(separator, start);
+        std::string entry = path_env->substr(start, end == std::string::npos ? std::string::npos : end - start);
+        if (!entry.empty()) {
+            if (auto resolved = resolve_command_hint(fs::path(entry), cmd)) {
+                return resolved;
+            }
+        }
+        if (end == std::string::npos) break;
+        start = end + 1;
+    }
+    return std::nullopt;
+}
+
+static inline std::optional<fs::path> resolve_command_path(const std::string &cmd)
+{
+    std::vector<fs::path> hints;
+
+    if (cmd == "pdftotext") {
+        if (auto env = get_env_copy("MEDIMG_PDFTOTEXT")) hints.emplace_back(*env);
+        if (auto env = get_env_copy("PDFTOTEXT_EXE")) hints.emplace_back(*env);
+    } else if (cmd == "curl" || cmd == "curl.exe") {
+        if (auto env = get_env_copy("MEDIMG_CURL")) hints.emplace_back(*env);
+        if (auto env = get_env_copy("CURL_EXE")) hints.emplace_back(*env);
+    } else if (cmd == "7z") {
+        if (auto env = get_env_copy("MEDIMG_7Z")) hints.emplace_back(*env);
+        if (auto env = get_env_copy("SEVENZIP_EXE")) hints.emplace_back(*env);
+    }
+
+    if (auto tools_dir = get_env_copy("MEDIMG_TOOLS_DIR")) hints.emplace_back(*tools_dir);
+    if (auto exe_dir = current_executable_dir()) hints.push_back(*exe_dir);
+    hints.push_back(fs::current_path());
+
+    for (const auto &hint : hints) {
+        if (auto resolved = resolve_command_hint(hint, cmd)) {
+            return resolved;
+        }
+    }
+
+    return find_command_on_path(cmd);
+}
+
+static inline fs::path require_command_path(const std::string &cmd, const std::string &error_message)
+{
+    if (auto resolved = resolve_command_path(cmd)) {
+        return *resolved;
+    }
+    throw std::runtime_error(error_message);
+}
+
 static inline fs::path create_zip_store(const fs::path &dir, const std::string &zip_name)
 {
     if (!fs::exists(dir)) throw std::runtime_error("目录不存在");
@@ -2267,7 +2398,7 @@ static inline fs::path create_zip_store(const fs::path &dir, const std::string &
     bool used_multicore = false;
 #ifdef _WIN32
     if (command_exists("7z")) {
-        std::string src_glob = powershell_single_quote_escape((dir / "*").string());
+        fs::path seven_zip = require_command_path("7z", "缺少 7z，且 PowerShell 压缩不可用");
         std::string dst_zip = powershell_single_quote_escape(tmp.string());
         std::string cmd =
             "powershell -NoProfile -NonInteractive -Command \""
@@ -2275,7 +2406,7 @@ static inline fs::path create_zip_store(const fs::path &dir, const std::string &
             "$d='" + powershell_single_quote_escape(dir.string()) + "'; "
             "$z='" + dst_zip + "'; "
             "Set-Location -LiteralPath $d; "
-            "& 7z a -tzip -mx=5 -mmt=on -y $z * | Out-Null\"";
+            "& '" + powershell_single_quote_escape(seven_zip.string()) + "' a -tzip -mx=5 -mmt=on -y $z * | Out-Null\"";
         rc = std::system(cmd.c_str());
         used_multicore = true;
     } else {
@@ -2841,13 +2972,7 @@ static inline CommandResult run_command_capture(const std::string &command)
 
 static inline bool command_exists(const std::string &cmd)
 {
-    std::string check;
-#ifdef _WIN32
-    check = "where " + cmd + " >NUL 2>NUL";
-#else
-    check = "command -v " + cmd + " >/dev/null 2>&1";
-#endif
-    return std::system(check.c_str()) == 0;
+    return resolve_command_path(cmd).has_value();
 }
 
 static inline std::string trim_copy(std::string s)
@@ -3116,6 +3241,7 @@ static inline void extract_zip_archive_to_dir(const fs::path &archive_path,
     std::string dst = powershell_single_quote_escape(output_dir.string());
 
     if (command_exists("7z")) {
+        fs::path seven_zip = require_command_path("7z", archive_label + " 解压失败：缺少 7z");
         std::string extract_cmd =
             "powershell -NoProfile -NonInteractive -Command \""
             "$ErrorActionPreference='Stop'; "
@@ -3123,7 +3249,7 @@ static inline void extract_zip_archive_to_dir(const fs::path &archive_path,
             "$dst='" + dst + "'; "
             "if (Test-Path -LiteralPath $dst) { Remove-Item -LiteralPath $dst -Recurse -Force }; "
             "New-Item -ItemType Directory -Path $dst -Force | Out-Null; "
-            "& 7z x -y ('-o' + $dst) -- $src * | Out-Null\"";
+            "& '" + powershell_single_quote_escape(seven_zip.string()) + "' x -y ('-o' + $dst) -- $src * | Out-Null\"";
         auto extract_out = run_command_capture(extract_cmd);
         extract_exit = extract_out.exit_code;
         extract_output = extract_out.output;
@@ -3280,14 +3406,19 @@ static inline std::string extract_text_for_rag(const fs::path &path)
 {
     std::string ext = lower_ext(path);
     if (ext == ".pdf") {
-        if (!command_exists("pdftotext")) {
-            throw std::runtime_error("缺少 pdftotext，请先安装 poppler 并确保 pdftotext 在 PATH 中");
-        }
+        fs::path pdftotext = require_command_path(
+            "pdftotext",
+            "缺少 pdftotext，请安装 poppler，或将 pdftotext.exe 放到程序目录旁的 tools/poppler/bin");
         std::string cmd;
 #ifdef _WIN32
-        cmd = "pdftotext -q " + shell_escape(path.string()) + " - 2>nul";
+        cmd =
+            "powershell -NoProfile -NonInteractive -Command \""
+            "$ErrorActionPreference='Stop'; "
+            "& '" + powershell_single_quote_escape(pdftotext.string()) + "' -q '" +
+            powershell_single_quote_escape(path.string()) +
+            "' - 2>$null\"";
 #else
-        cmd = "pdftotext -q " + shell_escape(path.string()) + " - 2>/dev/null";
+        cmd = shell_escape(pdftotext.string()) + " -q " + shell_escape(path.string()) + " - 2>/dev/null";
 #endif
         auto out = run_command_capture(cmd);
         if (out.exit_code != 0) {
@@ -3806,6 +3937,9 @@ static inline std::string llm_chat_completion(const LlmSettings &settings,
 
     std::string cmd;
 #ifdef _WIN32
+    fs::path curl_path = require_command_path(
+        "curl",
+        "缺少 curl.exe，请确保系统已安装 curl，或将 curl.exe 放到程序目录旁的 tools/curl");
     std::string ps_url = powershell_single_quote_escape(url);
     std::string ps_api_key = powershell_single_quote_escape(settings.api_key);
     std::string ps_payload = powershell_single_quote_escape(tmp_payload.string());
@@ -3815,7 +3949,8 @@ static inline std::string llm_chat_completion(const LlmSettings &settings,
           "$h1='Content-Type: application/json'; "
           "$h2='Authorization: Bearer " + ps_api_key + "'; "
           "$p='" + ps_payload + "'; "
-          "& curl.exe -sS -X POST $u -H $h1 -H $h2 --data-binary ('@' + $p) 2>&1\"";
+          "& '" + powershell_single_quote_escape(curl_path.string()) +
+          "' -sS -X POST $u -H $h1 -H $h2 --data-binary ('@' + $p) 2>&1\"";
 #else
     cmd = "curl -sS -X POST " + shell_escape(url) +
           " -H " + shell_escape("Content-Type: application/json") +

@@ -15,7 +15,8 @@ param(
     [string]$Triplet = "x64-windows",
     [ValidateSet('Release','Debug')][string]$Config = "Release",
     [switch]$AutoInstallCMake = $false,
-    [switch]$OfflineDeps = $true
+    [switch]$OfflineDeps = $true,
+    [switch]$AutoInstallRagTools = $true
 )
 
 Set-StrictMode -Version Latest
@@ -25,6 +26,54 @@ function Check-Tool([string]$name, [string]$exe) {
     $p = Get-Command $exe -ErrorAction SilentlyContinue
     if (-not $p) { Write-Host "⚠️ $name not found in PATH" -ForegroundColor Yellow; return $false }
     Write-Host "✅ Found ${name}: $($p.Source)" -ForegroundColor Green; return $true
+}
+
+function Find-ToolPath([string]$exe, [string[]]$CandidatePaths = @()) {
+    $command = Get-Command $exe -ErrorAction SilentlyContinue
+    if ($command) { return $command.Source }
+
+    foreach ($candidate in $CandidatePaths) {
+        if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
+        $expanded = [Environment]::ExpandEnvironmentVariables($candidate)
+        if ($expanded.IndexOf('*') -ge 0 -or $expanded.IndexOf('?') -ge 0) {
+            $match = Get-ChildItem -Path $expanded -File -ErrorAction SilentlyContinue |
+                Sort-Object FullName -Descending |
+                Select-Object -First 1
+            if ($match) { return $match.FullName }
+            continue
+        }
+        if (Test-Path $expanded) {
+            return (Resolve-Path $expanded).Path
+        }
+    }
+
+    return $null
+}
+
+function Copy-ToolFiles([string]$SourcePath, [string]$DestinationDir, [switch]$CopySiblingFiles = $false) {
+    if (-not $SourcePath) { return }
+    New-Item -ItemType Directory -Path $DestinationDir -Force | Out-Null
+    if ($CopySiblingFiles) {
+        Get-ChildItem -Path (Split-Path $SourcePath) -File -ErrorAction SilentlyContinue | ForEach-Object {
+            Copy-Item -Path $_.FullName -Destination (Join-Path $DestinationDir $_.Name) -Force
+        }
+        return
+    }
+    Copy-Item -Path $SourcePath -Destination (Join-Path $DestinationDir (Split-Path $SourcePath -Leaf)) -Force
+}
+
+function Install-PopplerIfNeeded() {
+    if (Get-Command winget -ErrorAction SilentlyContinue) {
+        Write-Host "Attempting to install Poppler via winget for PDF parsing..." -ForegroundColor Cyan
+        winget install --id oschwartz10612.Poppler -e --accept-package-agreements --accept-source-agreements
+        return
+    }
+    if (Get-Command choco -ErrorAction SilentlyContinue) {
+        Write-Host "Attempting to install Poppler via chocolatey for PDF parsing..." -ForegroundColor Cyan
+        choco install poppler -y
+        return
+    }
+    Write-Host "No supported package manager (winget/choco) found to auto-install Poppler." -ForegroundColor Yellow
 }
 
 Write-Host "== MedImgAIAnalyzer — Windows build helper ==" -ForegroundColor Cyan
@@ -147,13 +196,59 @@ Write-Host "✅ Built: $exePath" -ForegroundColor Green
 
 # If vcpkg provided DLLs, copy required DLLs next to exe so runtime runs
 if ($vcpkgRoot) {
-    $installed = Join-Path $vcpkgRoot 'installed\' + $Triplet + '\bin'
+    $installed = Join-Path $vcpkgRoot ("installed\$Triplet\bin")
     if (Test-Path $installed) {
         Write-Host "Copying vcpkg runtime DLLs to output folder" -ForegroundColor Cyan
         Get-ChildItem -Path $installed -Filter '*.dll' -ErrorAction SilentlyContinue | ForEach-Object {
             Copy-Item -Path $_.FullName -Destination (Split-Path $exePath) -Force
         }
     }
+}
+
+$outputDir = Split-Path $exePath -Parent
+$ragToolsDir = Join-Path $outputDir 'tools'
+$ragToolSummary = [ordered]@{}
+
+$curlPath = Find-ToolPath 'curl.exe'
+if ($curlPath) {
+    $curlDest = Join-Path $ragToolsDir 'curl'
+    Copy-ToolFiles -SourcePath $curlPath -DestinationDir $curlDest
+    $ragToolSummary['curl'] = "bundled ($curlPath)"
+} else {
+    $ragToolSummary['curl'] = 'missing'
+    Write-Warning 'curl.exe not found. LLM chat requests will fail until curl is installed or placed under build/bin/tools/curl.'
+}
+
+$pdftotextCandidates = @(
+    $env:MEDIMG_PDFTOTEXT,
+    (Join-Path $PSScriptRoot 'tools\poppler\bin\pdftotext.exe'),
+    (Join-Path $PSScriptRoot 'tools\poppler\Library\bin\pdftotext.exe'),
+    "$Env:ProgramFiles\poppler\Library\bin\pdftotext.exe",
+    "$Env:ProgramFiles\poppler\bin\pdftotext.exe",
+    "$Env:LOCALAPPDATA\Microsoft\WinGet\Packages\oschwartz10612.Poppler_*\poppler-*\Library\bin\pdftotext.exe",
+    "$Env:ChocolateyInstall\lib\poppler\tools\poppler*\Library\bin\pdftotext.exe",
+    "$Env:USERPROFILE\scoop\apps\poppler\current\Library\bin\pdftotext.exe"
+)
+$pdftotextPath = Find-ToolPath 'pdftotext.exe' $pdftotextCandidates
+if (-not $pdftotextPath -and $AutoInstallRagTools) {
+    Install-PopplerIfNeeded
+    $pdftotextPath = Find-ToolPath 'pdftotext.exe' $pdftotextCandidates
+}
+
+if ($pdftotextPath) {
+    $popplerDest = Join-Path $ragToolsDir 'poppler\bin'
+    Copy-ToolFiles -SourcePath $pdftotextPath -DestinationDir $popplerDest -CopySiblingFiles
+    $ragToolSummary['pdftotext'] = "bundled ($pdftotextPath)"
+} else {
+    $ragToolSummary['pdftotext'] = 'missing'
+    Write-Warning 'pdftotext.exe not found. PDF RAG parsing will remain unavailable until Poppler is installed or pdftotext.exe is placed under build/bin/tools/poppler/bin.'
+}
+
+$ragToolSummary['zip'] = 'ok (PowerShell Compress-Archive / ZipFile fallback)'
+
+Write-Host 'RAG runtime support summary:' -ForegroundColor Cyan
+$ragToolSummary.GetEnumerator() | ForEach-Object {
+    Write-Host ("  - {0}: {1}" -f $_.Key, $_.Value)
 }
 
 Write-Host "Running quick smoke test: MedImgAIAnalyzer.exe --help" -ForegroundColor Cyan
