@@ -204,18 +204,39 @@ struct InfoStore {
         if (name.empty()) throw std::runtime_error("name 不能为空");
         RuntimeLogger::info("创建项目开始: name=" + name);
         Project p;
-        p.uuid = generate_uuid_v4();
         p.name = name;
         p.createdAt = now_iso8601_utc();
         p.updatedAt = p.createdAt;
         p.note = note;
         {
             std::lock_guard<std::mutex> lk(mtx);
-            fs::path project_dir = base_path / p.uuid;
-            std::error_code ec;
-            fs::create_directories(project_dir, ec);
-            if (ec) {
-                throw std::runtime_error(std::string("创建项目目录失败: ") + ec.message());
+            fs::path project_dir;
+            bool created_dir = false;
+            constexpr int kMaxAttempts = 256;
+            for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
+                const std::string candidate_uuid = generate_uuid_v4();
+                if (index.find(candidate_uuid) != index.end()) {
+                    RuntimeLogger::warn("创建项目时检测到 UUID 索引冲突，重试: uuid=" + candidate_uuid);
+                    continue;
+                }
+
+                project_dir = base_path / candidate_uuid;
+                std::error_code ec;
+                const bool made = fs::create_directories(project_dir, ec);
+                if (ec) {
+                    throw std::runtime_error(std::string("创建项目目录失败: ") + ec.message());
+                }
+                if (!made) {
+                    RuntimeLogger::warn("创建项目时检测到 UUID 目录冲突，重试: uuid=" + candidate_uuid);
+                    continue;
+                }
+
+                p.uuid = candidate_uuid;
+                created_dir = true;
+                break;
+            }
+            if (!created_dir) {
+                throw std::runtime_error("无法生成唯一 UUID，请稍后重试");
             }
             write_project_json(project_dir / "project.json", p.uuid);
             index[p.uuid] = p;

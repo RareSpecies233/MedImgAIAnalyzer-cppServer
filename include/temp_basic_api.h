@@ -9,9 +9,35 @@ inline void register_temp_basic_routes(App &app,
 {
     CROW_ROUTE(app, "/api/temp/create").methods(crow::HTTPMethod::POST)([&store](const crow::request &req) {
         try {
-            const std::string temp_uuid = generate_uuid_v4();
-            fs::path dir = temp_project_dir(store, temp_uuid);
-            fs::create_directories(dir);
+            std::string temp_uuid;
+            fs::path dir;
+            bool created_dir = false;
+            constexpr int kMaxAttempts = 256;
+            for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
+                const std::string candidate_uuid = generate_uuid_v4();
+                if (fs::exists(store.base_path / candidate_uuid)) {
+                    RuntimeLogger::warn("创建临时项目时检测到正式项目 UUID 目录冲突，重试: uuid=" + candidate_uuid);
+                    continue;
+                }
+
+                dir = temp_project_dir(store, candidate_uuid);
+                std::error_code ec;
+                const bool made = fs::create_directories(dir, ec);
+                if (ec) {
+                    throw std::runtime_error(std::string("创建临时项目目录失败: ") + ec.message());
+                }
+                if (!made) {
+                    RuntimeLogger::warn("创建临时项目时检测到 temp UUID 目录冲突，重试: uuid=" + candidate_uuid);
+                    continue;
+                }
+
+                temp_uuid = candidate_uuid;
+                created_dir = true;
+                break;
+            }
+            if (!created_dir) {
+                throw std::runtime_error("无法生成唯一 tempUUID，请稍后重试");
+            }
             write_default_project_json_file(dir / "project.json", temp_uuid);
             crow::json::wvalue res;
             res["tempUUID"] = temp_uuid;
